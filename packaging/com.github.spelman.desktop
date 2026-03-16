@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Spelman
+GenericName=Music Player
+Comment=A terminal music player written in Rust
+Exec=spelman
+Terminal=true
+Categories=Audio;Music;Player;
+Keywords=music;audio;player;terminal;tui;

@@ -1,0 +1,102 @@
+name: Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build .deb package
+        run: cargo deb
+
+      - name: Upload .deb to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/debian/*.deb
+
+  rpm:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:42
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          dnf install -y rust cargo gcc alsa-lib-devel rpm-build rpmdevtools
+
+      - name: Setup rpmbuild tree
+        run: rpmdev-setuptree
+
+      - name: Create source tarball
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          mkdir -p Spelman-${VERSION}
+          cp -r src Cargo.toml Cargo.lock README.md LICENSE packaging Spelman-${VERSION}/
+          tar czf $HOME/rpmbuild/SOURCES/Spelman-${VERSION}.tar.gz Spelman-${VERSION}
+
+      - name: Build RPM
+        run: rpmbuild -bb packaging/spelman.spec
+
+      - name: Copy RPMs to workspace
+        run: |
+          mkdir -p rpms
+          find $HOME/rpmbuild/RPMS -name '*.rpm' -exec cp {} rpms/ \;
+
+      - name: Upload .rpm to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: rpms/*.rpm
+
+  flatpak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Flatpak and flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08 org.freedesktop.Sdk.Extension.rust-stable//24.08
+
+      - name: Generate cargo sources
+        run: |
+          pip install toml
+          curl -fsSL https://raw.githubusercontent.com/nickel-org/nickel.rs/master/nickel-org/nickel.rs/flatpak-cargo-generator.py -o flatpak-cargo-generator.py || true
+          python3 flatpak-cargo-generator.py Cargo.lock -o packaging/cargo-sources.json 2>/dev/null || echo "[]" > packaging/cargo-sources.json
+
+      - name: Update manifest source URL
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          sed -i "s|archive/refs/tags/v[0-9.]*|archive/refs/tags/v${VERSION}|" packaging/com.github.spelman.yml
+
+      - name: Build Flatpak
+        run: |
+          flatpak-builder --repo=repo --force-clean build-dir packaging/com.github.spelman.yml
+
+      - name: Create Flatpak bundle
+        run: |
+          flatpak build-bundle repo spelman.flatpak com.github.spelman
+
+      - name: Upload Flatpak to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: spelman.flatpak

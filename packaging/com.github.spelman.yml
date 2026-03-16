@@ -1,0 +1,33 @@
+app-id: com.github.spelman
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+
+command: spelman
+
+finish-args:
+  - --socket=pulseaudio
+  - --device=dri
+  - --filesystem=xdg-music:ro
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/spelman/cargo
+
+modules:
+  - name: spelman
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release
+      - install -Dm755 target/release/spelman /app/bin/spelman
+      - install -Dm644 packaging/com.github.spelman.desktop /app/share/applications/com.github.spelman.desktop
+    sources:
+      - type: archive
+        url: https://github.com/petterssonjonas/Spelman/archive/refs/tags/v0.1.0.tar.gz
+        sha256: '' # filled by CI or manually
+      - type: file
+        path: cargo-sources.json
+        # Generate with: flatpak-cargo-generator.py Cargo.lock

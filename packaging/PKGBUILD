@@ -1,0 +1,32 @@
+# Maintainer: Jonas Pettersson <noreply@github.com>
+pkgname=spelman
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='A terminal music player written in Rust'
+arch=('x86_64')
+url='https://github.com/petterssonjonas/Spelman'
+license=('MIT')
+depends=('alsa-lib')
+makedepends=('cargo' 'gcc')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "Spelman-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "Spelman-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release
+}
+
+package() {
+    cd "Spelman-$pkgver"
+    install -Dm755 "target/release/spelman" "$pkgdir/usr/bin/spelman"
+    install -Dm644 "packaging/com.github.spelman.desktop" "$pkgdir/usr/share/applications/com.github.spelman.desktop"
+    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

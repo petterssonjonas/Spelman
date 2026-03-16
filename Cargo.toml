@@ -2,6 +2,11 @@
 name = "spelman"
 version = "0.1.0"
 edition = "2024"
+description = "A terminal music player written in Rust"
+license = "MIT"
+repository = "https://github.com/petterssonjonas/Spelman"
+homepage = "https://github.com/petterssonjonas/Spelman"
+authors = ["Jonas Pettersson"]
 
 [[bin]]
 name = "spelman"
@@ -43,3 +48,12 @@ tracing-subscriber = "0.3"
 
 # XDG directories
 directories = "6"
+
+[package.metadata.deb]
+section = "sound"
+depends = "libasound2"
+assets = [
+    ["target/release/spelman", "usr/bin/", "755"],
+    ["packaging/com.github.spelman.desktop", "usr/share/applications/", "644"],
+    ["README.md", "usr/share/doc/spelman/", "644"],
+]
