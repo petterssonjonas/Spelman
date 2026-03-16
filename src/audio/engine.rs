@@ -262,7 +262,7 @@ fn engine_thread(cmd_rx: Receiver<AudioCommand>, event_tx: Sender<AudioEvent>) {
                             thread::sleep(Duration::from_millis(10));
                         }
                         stop_flag.store(true, Ordering::Release);
-                        let _ = event_tx.send(AudioEvent::Stopped);
+                        let _ = event_tx.send(AudioEvent::Finished);
                         state = EngineState::Idle;
                     }
                     Err(e) => {

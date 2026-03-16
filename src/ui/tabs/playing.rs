@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::playlist::queue::Queue;
 use crate::ui::widgets::progress_bar::ProgressBar;
 
 /// State for the Now Playing tab.
@@ -44,6 +45,7 @@ impl Default for PlayingState {
 
 pub struct PlayingTab<'a> {
     pub state: &'a PlayingState,
+    pub queue: &'a Queue,
 }
 
 impl<'a> Widget for PlayingTab<'a> {
@@ -71,7 +73,8 @@ impl<'a> Widget for PlayingTab<'a> {
             Constraint::Length(1), // progress bar
             Constraint::Length(1), // spacer
             Constraint::Length(1), // volume / format info
-            Constraint::Min(0),   // remaining space
+            Constraint::Length(1), // spacer
+            Constraint::Min(0),   // queue
         ])
         .split(inner);
 
@@ -163,5 +166,54 @@ impl<'a> Widget for PlayingTab<'a> {
         )))
         .centered()
         .render(chunks[9], buf);
+
+        // Queue display.
+        if !self.queue.is_empty() && chunks[11].height >= 2 {
+            let queue_area = chunks[11];
+            let queue_header = Line::from(vec![
+                Span::styled(
+                    format!(" Queue ({} tracks) ", self.queue.len()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]);
+            buf.set_line(queue_area.x, queue_area.y, &queue_header, queue_area.width);
+
+            let current_idx = self.queue.current_index();
+            let tracks = self.queue.tracks();
+            let max_rows = (queue_area.height as usize).saturating_sub(1);
+
+            // Show tracks around the current one.
+            let start = current_idx
+                .map(|i| i.saturating_sub(max_rows / 2))
+                .unwrap_or(0);
+
+            for (row, idx) in (start..tracks.len()).enumerate() {
+                if row >= max_rows {
+                    break;
+                }
+                let path = &tracks[idx];
+                let name = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "?".into());
+
+                let is_current = current_idx == Some(idx);
+                let prefix = if is_current { "▶ " } else { "  " };
+                let style = if is_current {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                let line = Line::from(Span::styled(
+                    format!("{prefix}{name}"),
+                    style,
+                ));
+                let y = queue_area.y + 1 + row as u16;
+                if y < queue_area.y + queue_area.height {
+                    buf.set_line(queue_area.x + 1, y, &line, queue_area.width.saturating_sub(2));
+                }
+            }
+        }
     }
 }

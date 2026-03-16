@@ -1,4 +1,7 @@
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use std::time::Duration;
 
 use crate::util::channels::AudioCommand;
@@ -11,7 +14,33 @@ pub enum Action {
     VolumeDown,
     SeekForward,
     SeekBackward,
+    /// Switch to tab (0-indexed).
+    SwitchTab(usize),
+    /// Next track in queue.
+    NextTrack,
+    /// Previous track in queue.
+    PrevTrack,
+    /// Mouse click at (column, row).
+    MouseClick { col: u16, row: u16 },
+    /// Scroll up.
+    ScrollUp,
+    /// Scroll down.
+    ScrollDown,
+    /// Navigate into selection (library drill-down, or enqueue).
+    Enter,
+    /// Navigate back (library drill-up).
+    Back,
     None,
+}
+
+/// Enable mouse capture (call once at startup).
+pub fn enable_mouse() -> std::io::Result<()> {
+    crossterm::execute!(std::io::stdout(), EnableMouseCapture)
+}
+
+/// Disable mouse capture (call at shutdown).
+pub fn disable_mouse() -> std::io::Result<()> {
+    crossterm::execute!(std::io::stdout(), DisableMouseCapture)
 }
 
 /// Poll for input events and translate to actions.
@@ -37,8 +66,35 @@ pub fn poll_input(timeout: Duration) -> std::io::Result<Action> {
             KeyCode::Char('-') | KeyCode::Char('_') => Action::VolumeDown,
             KeyCode::Right | KeyCode::Char('l') => Action::SeekForward,
             KeyCode::Left | KeyCode::Char('h') => Action::SeekBackward,
+            // Tab switching: 1-6.
+            KeyCode::Char('1') => Action::SwitchTab(0),
+            KeyCode::Char('2') => Action::SwitchTab(1),
+            KeyCode::Char('3') => Action::SwitchTab(2),
+            KeyCode::Char('4') => Action::SwitchTab(3),
+            KeyCode::Char('5') => Action::SwitchTab(4),
+            KeyCode::Char('6') => Action::SwitchTab(5),
+            KeyCode::Tab => Action::SwitchTab(usize::MAX), // cycle forward
+            KeyCode::BackTab => Action::SwitchTab(usize::MAX - 1), // cycle back
+            // Queue controls.
+            KeyCode::Char('n') => Action::NextTrack,
+            KeyCode::Char('p') => Action::PrevTrack,
+            // Navigation.
+            KeyCode::Enter => Action::Enter,
+            KeyCode::Backspace | KeyCode::Esc => Action::Back,
+            KeyCode::Char('j') | KeyCode::Down => Action::ScrollDown,
+            KeyCode::Char('k') | KeyCode::Up => Action::ScrollUp,
             _ => Action::None,
         }),
+        Event::Mouse(MouseEvent { kind, column, row, .. }) => {
+            Ok(match kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    Action::MouseClick { col: column, row }
+                }
+                MouseEventKind::ScrollUp => Action::ScrollUp,
+                MouseEventKind::ScrollDown => Action::ScrollDown,
+                _ => Action::None,
+            })
+        }
         _ => Ok(Action::None),
     }
 }

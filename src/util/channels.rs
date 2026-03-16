@@ -36,8 +36,10 @@ pub enum AudioEvent {
     Paused,
     /// Playback was resumed.
     Resumed,
-    /// Playback stopped (track ended or was stopped).
+    /// Playback stopped (user requested stop).
     Stopped,
+    /// Track finished playing naturally (for auto-advance).
+    Finished,
     /// An error occurred.
     Error(String),
     /// Decoded audio level for simple visualizer (RMS of recent samples, 0.0-1.0).

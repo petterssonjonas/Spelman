@@ -1,6 +1,8 @@
 mod app;
 mod audio;
 mod config;
+mod library;
+mod playlist;
 mod ui;
 mod util;
 
@@ -12,7 +14,7 @@ use app::App;
 use config::settings::Settings;
 
 #[derive(Parser)]
-#[command(name = "spelman", about = "A terminal music player")]
+#[command(name = "spelman", about = "A terminal music player", version)]
 struct Cli {
     /// Audio file to play.
     file: Option<PathBuf>,
