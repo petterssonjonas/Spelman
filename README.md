@@ -1,6 +1,14 @@
 # Spelman
 
-A terminal music player written in Rust. Inspired by [kew](https://github.com/ravachol/kew).
+A nice GPU accelerated, AI enabled terminal music player written in Rust.
+
+Generate lofi music as you work, to match your mood. Tell it to make it a bit more mellow, or faster or make it jazz... 
+
+Allow it to be your Pomodoro timer perhaps.
+
+Tell it your doing a 10 minute workout. Get something vigorous.
+
+Ask it to pull the latest news pod perhaps.
 
 ## Features
 
@@ -62,10 +70,37 @@ sudo apt install libasound2-dev
 - **Audio engine thread**: symphonia decoding → volume → ring buffer, sends position/level events via crossbeam channels
 - **cpal callback**: reads from lock-free ring buffer (real-time safe)
 
-## Planned
+## Roadmap
 
-- Tab-based navigation (Library, Playlists, Search, Settings, AI Player)
-- Album art rendering (Kitty/Sixel/halfblock)
+### Phase 3 — Search, Settings, Album Art *(in progress)*
+- Search tab — filter-as-you-type across artist/album/title
+- Settings tab — live config editing, persist to TOML
+- Album art — Kitty graphics protocol (kitty, Rio), ASCII art fallback (alacritty, etc.)
+- Shuffle & repeat modes (sequential, shuffle, repeat-one, repeat-all)
+- Theming (TOML-based, bundled Catppuccin/Gruvbox)
+- Terminal capability detection at startup
+
+### Phase 4 — Pomodoro Timer
+- Pomodoro mode that controls play/pause automatically
+- Work session plays your music, break swaps to a clock tick-tock track
+- UI transforms during breaks: analog clock, hourglass/sand timer, or digital countdown
+- Red indicator when break time is up
+- Configurable work/break durations
+
+### Phase 5 — Podcasts & RSS
+- Subscribe to RSS/Atom feeds for podcasts and newscasts
+- Download or stream episodes directly
+- Podcast-specific UI (show notes, episode list, playback speed)
+- Configurable feed list in settings
+
+### Phase 6 — AI Music Generation
+- AI tab — generate lofi/ambient music on the fly
+- Natural language control ("make it more mellow", "jazz it up", "something vigorous")
+- Built-in synth engine + Ollama for local inference
+- Cloud BYOK (bring your own API key) for hosted models
+- Mood-aware: "doing a 10 minute workout, give me something vigorous"
+
+### Future
 - Spectrum visualizer with Blackman-Harris FFT
 - 10-band graphic equalizer
 - EBU R128 loudness normalization
@@ -73,8 +108,6 @@ sudo apt install libasound2-dev
 - Audio device selection and hot-switching
 - MPRIS2 media controls
 - Chroma-like audio-reactive visual effects
-- AI music generation tab (built-in synth + Ollama + cloud BYOK)
-- Theming (TOML-based, bundled Catppuccin/Gruvbox)
 - SQLite library index with FTS5 search
 
 ## Credits

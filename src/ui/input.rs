@@ -30,6 +30,10 @@ pub enum Action {
     Enter,
     /// Navigate back (library drill-up).
     Back,
+    /// A character typed (for search input, etc).
+    Char(char),
+    /// Backspace (for search input).
+    Backspace,
     None,
 }
 
@@ -44,6 +48,7 @@ pub fn disable_mouse() -> std::io::Result<()> {
 }
 
 /// Poll for input events and translate to actions.
+/// `search_active` indicates if the search tab is focused (chars go to search box).
 pub fn poll_input(timeout: Duration) -> std::io::Result<Action> {
     if !event::poll(timeout)? {
         return Ok(Action::None);
@@ -55,10 +60,10 @@ pub fn poll_input(timeout: Duration) -> std::io::Result<Action> {
         Event::Key(KeyEvent {
             code, modifiers, ..
         }) => Ok(match code {
-            KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::Quit
             }
+            KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
             KeyCode::Char(' ') => {
                 Action::AudioCmd(AudioCommand::TogglePlayPause)
             }
@@ -73,16 +78,19 @@ pub fn poll_input(timeout: Duration) -> std::io::Result<Action> {
             KeyCode::Char('4') => Action::SwitchTab(3),
             KeyCode::Char('5') => Action::SwitchTab(4),
             KeyCode::Char('6') => Action::SwitchTab(5),
-            KeyCode::Tab => Action::SwitchTab(usize::MAX), // cycle forward
-            KeyCode::BackTab => Action::SwitchTab(usize::MAX - 1), // cycle back
+            KeyCode::Tab => Action::SwitchTab(usize::MAX),
+            KeyCode::BackTab => Action::SwitchTab(usize::MAX - 1),
             // Queue controls.
             KeyCode::Char('n') => Action::NextTrack,
             KeyCode::Char('p') => Action::PrevTrack,
             // Navigation.
             KeyCode::Enter => Action::Enter,
-            KeyCode::Backspace | KeyCode::Esc => Action::Back,
+            KeyCode::Esc => Action::Back,
+            KeyCode::Backspace => Action::Backspace,
             KeyCode::Char('j') | KeyCode::Down => Action::ScrollDown,
             KeyCode::Char('k') | KeyCode::Up => Action::ScrollUp,
+            // Pass through other characters for search/settings.
+            KeyCode::Char(ch) => Action::Char(ch),
             _ => Action::None,
         }),
         Event::Mouse(MouseEvent { kind, column, row, .. }) => {

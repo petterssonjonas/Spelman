@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::playlist::queue::Queue;
+use crate::ui::albumart::AlbumArt;
 use crate::ui::widgets::progress_bar::ProgressBar;
 
 /// State for the Now Playing tab.
@@ -46,6 +47,7 @@ impl Default for PlayingState {
 pub struct PlayingTab<'a> {
     pub state: &'a PlayingState,
     pub queue: &'a Queue,
+    pub album_art: &'a AlbumArt,
 }
 
 impl<'a> Widget for PlayingTab<'a> {
@@ -62,6 +64,41 @@ impl<'a> Widget for PlayingTab<'a> {
             return;
         }
 
+        // If we have album art, split into left (art) and right (info).
+        let (art_area, info_area) = if self.album_art.has_art && inner.width > 50 {
+            let cols = Layout::horizontal([
+                Constraint::Length(32), // art
+                Constraint::Min(0),    // info
+            ])
+            .split(inner);
+            (Some(cols[0]), cols[1])
+        } else {
+            (None, inner)
+        };
+
+        // Render ASCII album art if available.
+        if let Some(art_rect) = art_area {
+            for (i, line) in self.album_art.ascii_lines.iter().enumerate() {
+                let y = art_rect.y + i as u16;
+                if y >= art_rect.y + art_rect.height {
+                    break;
+                }
+                // ASCII art lines contain ANSI escapes for color, render as raw.
+                // For ratatui, we'll render a simplified version with block chars.
+                let display: String = line
+                    .chars()
+                    .filter(|c| !c.is_control() || *c == '\u{2580}')
+                    .take(art_rect.width as usize)
+                    .collect();
+                buf.set_string(
+                    art_rect.x,
+                    y,
+                    &display,
+                    Style::default().fg(Color::DarkGray),
+                );
+            }
+        }
+
         let chunks = Layout::vertical([
             Constraint::Length(1), // spacer
             Constraint::Length(1), // title
@@ -76,7 +113,7 @@ impl<'a> Widget for PlayingTab<'a> {
             Constraint::Length(1), // spacer
             Constraint::Min(0),   // queue
         ])
-        .split(inner);
+        .split(info_area);
 
         // Title.
         let title = if self.state.title.is_empty() {
@@ -129,7 +166,6 @@ impl<'a> Widget for PlayingTab<'a> {
             "⏹ Stopped"
         };
 
-        // Simple level indicator.
         let level_bars = (self.state.level * 20.0).round() as usize;
         let level_str: String = "▮".repeat(level_bars.min(20));
         let empty_str: String = "▯".repeat(20_usize.saturating_sub(level_bars));
@@ -170,19 +206,16 @@ impl<'a> Widget for PlayingTab<'a> {
         // Queue display.
         if !self.queue.is_empty() && chunks[11].height >= 2 {
             let queue_area = chunks[11];
-            let queue_header = Line::from(vec![
-                Span::styled(
-                    format!(" Queue ({} tracks) ", self.queue.len()),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
+            let queue_header = Line::from(vec![Span::styled(
+                format!(" Queue ({} tracks) ", self.queue.len()),
+                Style::default().fg(Color::DarkGray),
+            )]);
             buf.set_line(queue_area.x, queue_area.y, &queue_header, queue_area.width);
 
             let current_idx = self.queue.current_index();
             let tracks = self.queue.tracks();
             let max_rows = (queue_area.height as usize).saturating_sub(1);
 
-            // Show tracks around the current one.
             let start = current_idx
                 .map(|i| i.saturating_sub(max_rows / 2))
                 .unwrap_or(0);
@@ -205,13 +238,15 @@ impl<'a> Widget for PlayingTab<'a> {
                     Style::default().fg(Color::DarkGray)
                 };
 
-                let line = Line::from(Span::styled(
-                    format!("{prefix}{name}"),
-                    style,
-                ));
+                let line = Line::from(Span::styled(format!("{prefix}{name}"), style));
                 let y = queue_area.y + 1 + row as u16;
                 if y < queue_area.y + queue_area.height {
-                    buf.set_line(queue_area.x + 1, y, &line, queue_area.width.saturating_sub(2));
+                    buf.set_line(
+                        queue_area.x + 1,
+                        y,
+                        &line,
+                        queue_area.width.saturating_sub(2),
+                    );
                 }
             }
         }

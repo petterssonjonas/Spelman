@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let settings = Settings::default();
+    let settings = Settings::load();
     let mut app = App::new(settings);
 
     if let Some(ref file) = cli.file {

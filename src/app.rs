@@ -19,10 +19,13 @@ use crate::audio::engine::AudioEngine;
 use crate::config::settings::Settings;
 use crate::library::scanner::{self, ScanEvent};
 use crate::playlist::queue::Queue;
+use crate::ui::albumart::{AlbumArt, GraphicsProtocol};
 use crate::ui::input::{self, Action};
 use crate::ui::layout;
 use crate::ui::tabs::library::{LibraryState, LibraryTab, LibraryView};
 use crate::ui::tabs::playing::{PlayingState, PlayingTab};
+use crate::ui::tabs::search::{SearchState, SearchTab};
+use crate::ui::tabs::settings::{SettingsState, SettingsTab};
 use crate::util::channels::{AudioCommand, AudioEvent};
 
 const TAB_COUNT: usize = 6;
@@ -33,7 +36,7 @@ const TAB_NAMES: [&str; TAB_COUNT] = [
 
 /// Which tabs are currently functional.
 const TAB_ENABLED: [bool; TAB_COUNT] = [
-    true, true, false, false, false, false,
+    true, true, false, true, true, false,
 ];
 
 pub struct App {
@@ -41,7 +44,11 @@ pub struct App {
     engine: AudioEngine,
     playing: PlayingState,
     library_state: LibraryState,
+    search_state: SearchState,
+    settings_state: SettingsState,
     queue: Queue,
+    album_art: AlbumArt,
+    graphics_protocol: GraphicsProtocol,
     active_tab: usize,
     should_quit: bool,
     scan_rx: Option<crossbeam_channel::Receiver<ScanEvent>>,
@@ -58,12 +65,18 @@ impl App {
         let mut playing = PlayingState::default();
         playing.volume = volume;
 
+        let protocol = crate::ui::albumart::detect_protocol();
+
         Self {
             settings,
             engine,
             playing,
             library_state: LibraryState::default(),
+            search_state: SearchState::default(),
+            settings_state: SettingsState::default(),
             queue: Queue::new(),
+            album_art: AlbumArt::default(),
+            graphics_protocol: protocol,
             active_tab: 0,
             should_quit: false,
             scan_rx: None,
@@ -135,6 +148,11 @@ impl App {
             // Process scan events.
             self.process_scan_events();
 
+            // Update album art if track changed.
+            if let Some(ref path) = self.playing.file_path.clone() {
+                self.album_art.update(path, self.graphics_protocol, 30, 15);
+            }
+
             // Render.
             terminal.draw(|frame| {
                 let area = frame.area();
@@ -157,6 +175,17 @@ impl App {
                     };
                     tab_spans.push(Span::styled(label, style));
                 }
+
+                // Shuffle/Repeat indicators.
+                let mode_indicator = self.mode_indicator();
+                if !mode_indicator.is_empty() {
+                    tab_spans.push(Span::raw("  "));
+                    tab_spans.push(Span::styled(
+                        mode_indicator,
+                        Style::default().fg(Color::Yellow),
+                    ));
+                }
+
                 frame.render_widget(
                     Paragraph::new(Line::from(tab_spans)),
                     header,
@@ -169,16 +198,14 @@ impl App {
                             PlayingTab {
                                 state: &self.playing,
                                 queue: &self.queue,
+                                album_art: &self.album_art,
                             },
                             content,
                         );
-                        // Compute progress bar rect for mouse seeking.
-                        // The progress bar is at a known offset inside PlayingTab.
-                        // We estimate: block border (1) + spacer(1) + title(1) + artist(1) + album(1) + spacer(1) + status(1) + spacer(1) + progress(1) = row 8
                         let progress_y = content.y + 8;
                         if progress_y < content.y + content.height {
                             self.progress_bar_rect = Some(ratatui::layout::Rect {
-                                x: content.x + 1, // inside border
+                                x: content.x + 1,
                                 y: progress_y,
                                 width: content.width.saturating_sub(2),
                                 height: 1,
@@ -194,8 +221,26 @@ impl App {
                         );
                         self.progress_bar_rect = None;
                     }
+                    3 => {
+                        frame.render_widget(
+                            SearchTab {
+                                state: &self.search_state,
+                            },
+                            content,
+                        );
+                        self.progress_bar_rect = None;
+                    }
+                    4 => {
+                        frame.render_widget(
+                            SettingsTab {
+                                state: &self.settings_state,
+                                settings: &self.settings,
+                            },
+                            content,
+                        );
+                        self.progress_bar_rect = None;
+                    }
                     _ => {
-                        // Placeholder for unimplemented tabs.
                         let msg = format!("{} — coming in a future release", TAB_NAMES[self.active_tab]);
                         frame.render_widget(
                             Paragraph::new(Line::from(Span::styled(
@@ -264,24 +309,22 @@ impl App {
                     self.play_prev();
                 }
                 Action::ScrollDown => {
-                    if self.active_tab == 1 {
-                        self.library_state.move_down();
-                        self.update_library_scroll();
-                    }
+                    self.handle_scroll_down();
                 }
                 Action::ScrollUp => {
-                    if self.active_tab == 1 {
-                        self.library_state.move_up();
-                        self.update_library_scroll();
-                    }
+                    self.handle_scroll_up();
                 }
                 Action::Enter => {
                     self.handle_enter();
                 }
                 Action::Back => {
-                    if self.active_tab == 1 {
-                        self.library_state.back();
-                    }
+                    self.handle_back();
+                }
+                Action::Char(ch) => {
+                    self.handle_char(ch);
+                }
+                Action::Backspace => {
+                    self.handle_backspace();
                 }
                 Action::MouseClick { col, row } => {
                     self.handle_mouse_click(col, row);
@@ -293,29 +336,56 @@ impl App {
 
     fn switch_tab(&mut self, tab: usize) {
         if tab == usize::MAX {
-            // Cycle forward.
             self.active_tab = (self.active_tab + 1) % TAB_COUNT;
         } else if tab == usize::MAX - 1 {
-            // Cycle backward.
             self.active_tab = (self.active_tab + TAB_COUNT - 1) % TAB_COUNT;
         } else if tab < TAB_COUNT {
             self.active_tab = tab;
         }
     }
 
+    fn handle_scroll_down(&mut self) {
+        match self.active_tab {
+            1 => {
+                self.library_state.move_down();
+                self.update_library_scroll();
+            }
+            3 => {
+                self.search_state.move_down();
+            }
+            4 => {
+                self.settings_state
+                    .move_down(SettingsState::item_count());
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_scroll_up(&mut self) {
+        match self.active_tab {
+            1 => {
+                self.library_state.move_up();
+                self.update_library_scroll();
+            }
+            3 => {
+                self.search_state.move_up();
+            }
+            4 => {
+                self.settings_state.move_up();
+            }
+            _ => {}
+        }
+    }
+
     fn handle_enter(&mut self) {
         match self.active_tab {
             1 => {
-                // Library tab.
                 if let LibraryView::Tracks { .. } = &self.library_state.view {
-                    // Enqueue the selected track and play it.
                     if let Some(path) = self.library_state.selected_track_path() {
                         self.queue.push(path.clone());
-                        // If nothing is playing, start playback.
                         if !self.playing.is_playing && self.playing.file_path.is_none() {
                             self.engine.send(AudioCommand::Play(path));
                         } else {
-                            // Jump to this track.
                             let idx = self.queue.tracks().len() - 1;
                             self.queue.set_current(idx);
                             self.engine.send(AudioCommand::Play(path));
@@ -325,7 +395,56 @@ impl App {
                     self.library_state.enter();
                 }
             }
+            3 => {
+                // Search: enqueue and play selected track.
+                if let Some(path) = self.search_state.selected_track_path() {
+                    self.queue.push(path.clone());
+                    let idx = self.queue.tracks().len() - 1;
+                    self.queue.set_current(idx);
+                    self.engine.send(AudioCommand::Play(path));
+                }
+            }
+            4 => {
+                // Settings: toggle the selected setting.
+                self.settings_state.toggle(&mut self.settings);
+            }
             _ => {}
+        }
+    }
+
+    fn handle_back(&mut self) {
+        match self.active_tab {
+            1 => self.library_state.back(),
+            _ => {}
+        }
+    }
+
+    fn handle_char(&mut self, ch: char) {
+        if self.active_tab == 3 {
+            // Search tab: type into search box.
+            self.search_state.push_char(ch);
+            self.search_state
+                .update_results(&self.library_state.library);
+        } else if self.active_tab == 4 && ch == 's' {
+            // Save settings.
+            match self.settings.save() {
+                Ok(()) => {
+                    self.settings_state.status_message =
+                        Some("Settings saved!".into());
+                }
+                Err(e) => {
+                    self.settings_state.status_message =
+                        Some(format!("Save failed: {e}"));
+                }
+            }
+        }
+    }
+
+    fn handle_backspace(&mut self) {
+        if self.active_tab == 3 {
+            self.search_state.pop_char();
+            self.search_state
+                .update_results(&self.library_state.library);
         }
     }
 
@@ -333,7 +452,6 @@ impl App {
         // Check if click is on tab bar.
         if let Some(tab_rect) = self.tab_bar_rect {
             if row == tab_rect.y && col >= tab_rect.x && col < tab_rect.x + tab_rect.width {
-                // Figure out which tab was clicked based on character position.
                 let mut x = tab_rect.x;
                 for (i, name) in TAB_NAMES.iter().enumerate() {
                     let label_len = format!(" {}:{name} ", i + 1).len() as u16;
@@ -350,7 +468,6 @@ impl App {
         if let Some(bar_rect) = self.progress_bar_rect {
             if row == bar_rect.y && col >= bar_rect.x && col < bar_rect.x + bar_rect.width {
                 if self.playing.duration.as_secs_f64() > 0.0 {
-                    // Calculate time label widths to get the actual bar area.
                     let elapsed_label_len = format_duration(self.playing.elapsed).len() as u16;
                     let total_label_len = format_duration(self.playing.duration).len() as u16;
                     let bar_start = bar_rect.x + elapsed_label_len + 1;
@@ -365,26 +482,21 @@ impl App {
                         self.engine.send(AudioCommand::Seek(seek_pos));
                     }
                 }
-                return;
             }
-        }
-
-        // Library tab: click to select items.
-        if self.active_tab == 1 {
-            // Items start a few rows below the content area.
-            // Rough estimate: content_y + 1 (border) + 1 (breadcrumb) = first item row.
-            // This is approximate but functional.
         }
     }
 
     fn play_next(&mut self) {
-        if let Some(path) = self.queue.next().cloned() {
+        let next = self.queue.next_with_mode(
+            self.settings.shuffle,
+            self.settings.repeat_mode,
+        );
+        if let Some(path) = next.cloned() {
             self.engine.send(AudioCommand::Play(path));
         }
     }
 
     fn play_prev(&mut self) {
-        // If more than 3 seconds into the track, restart it instead of going back.
         if self.playing.elapsed.as_secs() > 3 {
             self.engine.send(AudioCommand::Seek(Duration::ZERO));
             return;
@@ -395,10 +507,8 @@ impl App {
     }
 
     fn update_library_scroll(&mut self) {
-        // Keep selected item visible.
         let selected = self.library_state.selected;
         let offset = self.library_state.scroll_offset;
-        // Assume ~20 visible lines (will be approximate).
         let visible = 20;
 
         if selected < offset {
@@ -406,6 +516,21 @@ impl App {
         } else if selected >= offset + visible {
             self.library_state.scroll_offset = selected - visible + 1;
         }
+    }
+
+    fn mode_indicator(&self) -> String {
+        use crate::config::settings::{RepeatMode, ShuffleMode};
+        let mut parts = Vec::new();
+        match self.settings.shuffle {
+            ShuffleMode::On => parts.push("Shuffle"),
+            ShuffleMode::Off => {}
+        }
+        match self.settings.repeat_mode {
+            RepeatMode::All => parts.push("Repeat:All"),
+            RepeatMode::One => parts.push("Repeat:1"),
+            RepeatMode::Off => {}
+        }
+        parts.join(" | ")
     }
 
     fn process_audio_events(&mut self) {
@@ -424,7 +549,6 @@ impl App {
                     self.playing.elapsed = Duration::ZERO;
                     self.playing.file_path = Some(path.clone());
 
-                    // Try to read metadata.
                     self.load_metadata(&path);
                 }
                 AudioEvent::Position(pos) => {
@@ -441,14 +565,12 @@ impl App {
                 }
                 AudioEvent::Finished => {
                     self.playing.is_playing = false;
-                    // Auto-advance to next track.
                     self.play_next();
                 }
                 AudioEvent::Error(msg) => {
                     tracing::error!("Audio error: {msg}");
                 }
                 AudioEvent::Level(level) => {
-                    // Smooth the level a bit for display.
                     self.playing.level =
                         self.playing.level * 0.7 + level * 0.3;
                 }
@@ -467,9 +589,7 @@ impl App {
                 ScanEvent::Started => {
                     self.library_state.library.scanning = true;
                 }
-                ScanEvent::Progress { found: _ } => {
-                    // Could update a counter UI here.
-                }
+                ScanEvent::Progress { found: _ } => {}
                 ScanEvent::Complete(library) => {
                     self.library_state.library = library;
                     self.library_state.library.scanning = false;
@@ -529,7 +649,6 @@ impl App {
 
         let mut spans = Vec::new();
 
-        // Global hints.
         spans.extend(hint("Space", "play/pause"));
         spans.extend(hint("n/p", "next/prev"));
 
@@ -542,6 +661,16 @@ impl App {
                 spans.extend(hint("j/k", "navigate"));
                 spans.extend(hint("Enter", "select"));
                 spans.extend(hint("Bksp", "back"));
+            }
+            3 => {
+                spans.extend(hint("type", "search"));
+                spans.extend(hint("j/k", "navigate"));
+                spans.extend(hint("Enter", "play"));
+            }
+            4 => {
+                spans.extend(hint("j/k", "navigate"));
+                spans.extend(hint("Enter", "toggle"));
+                spans.extend(hint("s", "save"));
             }
             _ => {}
         }
