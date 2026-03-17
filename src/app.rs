@@ -19,11 +19,13 @@ use crate::audio::engine::AudioEngine;
 use crate::config::settings::Settings;
 use crate::library::scanner::{self, ScanEvent};
 use crate::playlist::queue::Queue;
+use crate::pomodoro::timer::{PomodoroAction, PomodoroTimer};
 use crate::ui::albumart::{AlbumArt, GraphicsProtocol};
 use crate::ui::input::{self, Action};
 use crate::ui::layout;
 use crate::ui::tabs::library::{LibraryState, LibraryTab, LibraryView};
 use crate::ui::tabs::playing::{PlayingState, PlayingTab};
+use crate::ui::tabs::pomodoro::PomodoroTab;
 use crate::ui::tabs::search::{SearchState, SearchTab};
 use crate::ui::tabs::settings::{SettingsState, SettingsTab};
 use crate::util::channels::{AudioCommand, AudioEvent};
@@ -31,12 +33,12 @@ use crate::util::channels::{AudioCommand, AudioEvent};
 const TAB_COUNT: usize = 6;
 
 const TAB_NAMES: [&str; TAB_COUNT] = [
-    "Playing", "Library", "Playlists", "Search", "Settings", "AI",
+    "Playing", "Library", "Pomodoro", "Search", "Settings", "AI",
 ];
 
 /// Which tabs are currently functional.
 const TAB_ENABLED: [bool; TAB_COUNT] = [
-    true, true, false, true, true, false,
+    true, true, true, true, true, false,
 ];
 
 pub struct App {
@@ -47,6 +49,7 @@ pub struct App {
     search_state: SearchState,
     settings_state: SettingsState,
     queue: Queue,
+    pomodoro: PomodoroTimer,
     album_art: AlbumArt,
     graphics_protocol: GraphicsProtocol,
     active_tab: usize,
@@ -75,6 +78,7 @@ impl App {
             search_state: SearchState::default(),
             settings_state: SettingsState::default(),
             queue: Queue::new(),
+            pomodoro: PomodoroTimer::default(),
             album_art: AlbumArt::default(),
             graphics_protocol: protocol,
             active_tab: 0,
@@ -147,6 +151,16 @@ impl App {
             self.process_audio_events();
             // Process scan events.
             self.process_scan_events();
+            // Tick the pomodoro timer.
+            match self.pomodoro.tick() {
+                PomodoroAction::PauseMusic => {
+                    self.engine.send(AudioCommand::Pause);
+                }
+                PomodoroAction::ResumeMusic => {
+                    self.engine.send(AudioCommand::Resume);
+                }
+                PomodoroAction::None => {}
+            }
 
             // Update album art if track changed.
             if let Some(ref path) = self.playing.file_path.clone() {
@@ -221,6 +235,15 @@ impl App {
                         );
                         self.progress_bar_rect = None;
                     }
+                    2 => {
+                        frame.render_widget(
+                            PomodoroTab {
+                                timer: &self.pomodoro,
+                            },
+                            content,
+                        );
+                        self.progress_bar_rect = None;
+                    }
                     3 => {
                         frame.render_widget(
                             SearchTab {
@@ -270,7 +293,11 @@ impl App {
                     self.should_quit = true;
                 }
                 Action::AudioCmd(cmd) => {
-                    self.engine.send(cmd);
+                    if self.active_tab == 2 && matches!(cmd, AudioCommand::TogglePlayPause) {
+                        self.pomodoro.toggle_pause();
+                    } else {
+                        self.engine.send(cmd);
+                    }
                 }
                 Action::VolumeUp => {
                     self.playing.volume =
@@ -379,6 +406,11 @@ impl App {
 
     fn handle_enter(&mut self) {
         match self.active_tab {
+            2 => {
+                if !self.pomodoro.active {
+                    self.pomodoro.start();
+                }
+            }
             1 => {
                 if let LibraryView::Tracks { .. } = &self.library_state.view {
                     if let Some(path) = self.library_state.selected_track_path() {
@@ -415,11 +447,30 @@ impl App {
     fn handle_back(&mut self) {
         match self.active_tab {
             1 => self.library_state.back(),
+            2 => self.pomodoro.stop(),
             _ => {}
         }
     }
 
     fn handle_char(&mut self, ch: char) {
+        if self.active_tab == 2 {
+            match ch {
+                'v' => self.pomodoro.cycle_style(),
+                's' => {
+                    match self.pomodoro.skip() {
+                        PomodoroAction::PauseMusic => {
+                            self.engine.send(AudioCommand::Pause);
+                        }
+                        PomodoroAction::ResumeMusic => {
+                            self.engine.send(AudioCommand::Resume);
+                        }
+                        PomodoroAction::None => {}
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.active_tab == 3 {
             // Search tab: type into search box.
             self.search_state.push_char(ch);
@@ -661,6 +712,17 @@ impl App {
                 spans.extend(hint("j/k", "navigate"));
                 spans.extend(hint("Enter", "select"));
                 spans.extend(hint("Bksp", "back"));
+            }
+            2 => {
+                if self.pomodoro.active {
+                    spans.extend(hint("Space", "pause/resume"));
+                    spans.extend(hint("s", "skip phase"));
+                    spans.extend(hint("v", "cycle style"));
+                    spans.extend(hint("Esc", "stop"));
+                } else {
+                    spans.extend(hint("Enter", "start"));
+                    spans.extend(hint("v", "cycle style"));
+                }
             }
             3 => {
                 spans.extend(hint("type", "search"));
