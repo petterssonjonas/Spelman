@@ -2,13 +2,14 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::playlist::queue::Queue;
 use crate::ui::albumart::AlbumArt;
 use crate::ui::widgets::progress_bar::ProgressBar;
+use crate::ui::widgets::visualizer::Visualizer;
 
 /// State for the Now Playing tab.
 #[derive(Debug, Clone)]
@@ -24,6 +25,8 @@ pub struct PlayingState {
     pub sample_rate: u32,
     pub channels: u16,
     pub level: f32,
+    /// Smoothed spectrum bars for visualizer (0.0-1.0 each).
+    pub spectrum: Vec<f32>,
 }
 
 impl Default for PlayingState {
@@ -40,6 +43,21 @@ impl Default for PlayingState {
             sample_rate: 0,
             channels: 0,
             level: 0.0,
+            spectrum: Vec::new(),
+        }
+    }
+}
+
+impl PlayingState {
+    /// Smooth incoming spectrum data with exponential moving average.
+    pub fn update_spectrum(&mut self, raw: &[f32]) {
+        if self.spectrum.len() != raw.len() {
+            self.spectrum = raw.to_vec();
+            return;
+        }
+        let smoothing = 0.35;
+        for (s, &r) in self.spectrum.iter_mut().zip(raw.iter()) {
+            *s = *s * smoothing + r * (1.0 - smoothing);
         }
     }
 }
@@ -52,13 +70,7 @@ pub struct PlayingTab<'a> {
 
 impl<'a> Widget for PlayingTab<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" Now Playing ");
-
-        let inner = block.inner(area);
-        block.render(area, buf);
+        let inner = area;
 
         if inner.height < 4 || inner.width < 20 {
             return;
@@ -83,8 +95,6 @@ impl<'a> Widget for PlayingTab<'a> {
                 if y >= art_rect.y + art_rect.height {
                     break;
                 }
-                // ASCII art lines contain ANSI escapes for color, render as raw.
-                // For ratatui, we'll render a simplified version with block chars.
                 let display: String = line
                     .chars()
                     .filter(|c| !c.is_control() || *c == '\u{2580}')
@@ -100,16 +110,13 @@ impl<'a> Widget for PlayingTab<'a> {
         }
 
         let chunks = Layout::vertical([
-            Constraint::Length(1), // spacer
             Constraint::Length(1), // title
             Constraint::Length(1), // artist
             Constraint::Length(1), // album
-            Constraint::Length(1), // spacer
-            Constraint::Length(1), // status line
-            Constraint::Length(1), // spacer
+            Constraint::Length(1), // status + format info
             Constraint::Length(1), // progress bar
             Constraint::Length(1), // spacer
-            Constraint::Length(1), // volume / format info
+            Constraint::Min(4),   // visualizer
             Constraint::Length(1), // spacer
             Constraint::Min(0),   // queue
         ])
@@ -135,7 +142,7 @@ impl<'a> Widget for PlayingTab<'a> {
                 .add_modifier(Modifier::BOLD),
         )]))
         .centered()
-        .render(chunks[1], buf);
+        .render(chunks[0], buf);
 
         // Artist.
         if !self.state.artist.is_empty() {
@@ -144,7 +151,7 @@ impl<'a> Widget for PlayingTab<'a> {
                 Style::default().fg(Color::Yellow),
             )]))
             .centered()
-            .render(chunks[2], buf);
+            .render(chunks[1], buf);
         }
 
         // Album.
@@ -154,10 +161,10 @@ impl<'a> Widget for PlayingTab<'a> {
                 Style::default().fg(Color::DarkGray),
             )]))
             .centered()
-            .render(chunks[3], buf);
+            .render(chunks[2], buf);
         }
 
-        // Status.
+        // Status + volume/format info combined.
         let status_icon = if self.state.is_playing {
             "▶ Playing"
         } else if self.state.file_path.is_some() {
@@ -166,46 +173,41 @@ impl<'a> Widget for PlayingTab<'a> {
             "⏹ Stopped"
         };
 
-        let level_bars = (self.state.level * 20.0).round() as usize;
-        let level_str: String = "▮".repeat(level_bars.min(20));
-        let empty_str: String = "▯".repeat(20_usize.saturating_sub(level_bars));
+        let vol_pct = (self.state.volume * 100.0) as u8;
+        let format_info = if self.state.sample_rate > 0 {
+            format!(
+                "│  Vol: {}%  │  {}Hz {}ch",
+                vol_pct, self.state.sample_rate, self.state.channels
+            )
+        } else {
+            format!("│  Vol: {}%", vol_pct)
+        };
 
         let status_line = Line::from(vec![
             Span::styled(status_icon, Style::default().fg(Color::Green)),
-            Span::raw("  "),
-            Span::styled(level_str, Style::default().fg(Color::Cyan)),
-            Span::styled(empty_str, Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("  {format_info}"), Style::default().fg(Color::DarkGray)),
         ]);
         Paragraph::new(status_line)
             .centered()
-            .render(chunks[5], buf);
+            .render(chunks[3], buf);
 
         // Progress bar.
         ProgressBar::default()
             .elapsed(self.state.elapsed)
             .total(self.state.duration)
-            .render(chunks[7], buf);
+            .render(chunks[4], buf);
 
-        // Volume / format info.
-        let vol_pct = (self.state.volume * 100.0) as u8;
-        let format_info = if self.state.sample_rate > 0 {
-            format!(
-                "Vol: {}%  │  {}Hz {}ch",
-                vol_pct, self.state.sample_rate, self.state.channels
-            )
-        } else {
-            format!("Vol: {}%", vol_pct)
-        };
-        Paragraph::new(Line::from(Span::styled(
-            format_info,
-            Style::default().fg(Color::DarkGray),
-        )))
-        .centered()
-        .render(chunks[9], buf);
+        // Spectrum visualizer.
+        if !self.state.spectrum.is_empty() {
+            Visualizer {
+                spectrum: &self.state.spectrum,
+            }
+            .render(chunks[6], buf);
+        }
 
         // Queue display.
-        if !self.queue.is_empty() && chunks[11].height >= 2 {
-            let queue_area = chunks[11];
+        if !self.queue.is_empty() && chunks[8].height >= 2 {
+            let queue_area = chunks[8];
             let queue_header = Line::from(vec![Span::styled(
                 format!(" Queue ({} tracks) ", self.queue.len()),
                 Style::default().fg(Color::DarkGray),

@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget};
 
 use crate::pomodoro::timer::{PomodoroPhase, PomodoroTimer, TimerStyle};
 
@@ -12,13 +12,7 @@ pub struct PomodoroTab<'a> {
 
 impl<'a> Widget for PomodoroTab<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" Pomodoro ");
-
-        let inner = block.inner(area);
-        block.render(area, buf);
+        let inner = area;
 
         if inner.height < 4 || inner.width < 20 {
             return;

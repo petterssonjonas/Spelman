@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Widget};
+use ratatui::widgets::{List, ListItem, Paragraph, Widget};
 use std::path::PathBuf;
 
 use crate::library::types::{Library, Track};
@@ -103,13 +103,7 @@ pub struct SearchTab<'a> {
 
 impl<'a> Widget for SearchTab<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" Search ");
-
-        let inner = block.inner(area);
-        block.render(area, buf);
+        let inner = area;
 
         if inner.height < 3 || inner.width < 10 {
             return;

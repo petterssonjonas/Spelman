@@ -137,6 +137,13 @@ fn engine_thread(cmd_rx: Receiver<AudioCommand>, event_tx: Sender<AudioEvent>) {
     let mut state = EngineState::Idle;
     let is_paused = Arc::new(AtomicBool::new(false));
 
+    // FFT state for spectrum analysis.
+    const FFT_SIZE: usize = 2048;
+    const NUM_BARS: usize = 32;
+    let mut fft_mono_buf: Vec<f32> = Vec::with_capacity(FFT_SIZE);
+    let mut planner = rustfft::FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(FFT_SIZE);
+
     loop {
         let is_idle = matches!(state, EngineState::Idle);
 
@@ -240,6 +247,23 @@ fn engine_thread(cmd_rx: Receiver<AudioCommand>, event_tx: Sender<AudioEvent>) {
                             (sum / samples.len() as f32).sqrt()
                         };
                         let _ = event_tx.send(AudioEvent::Level(rms));
+
+                        // Accumulate mono samples for FFT spectrum.
+                        let ch = *channels as usize;
+                        for chunk in samples.chunks(ch) {
+                            let mono: f32 = chunk.iter().sum::<f32>() / ch as f32;
+                            fft_mono_buf.push(mono);
+                        }
+                        if fft_mono_buf.len() >= FFT_SIZE {
+                            let spectrum = compute_spectrum(
+                                &fft_mono_buf[..FFT_SIZE],
+                                &fft,
+                                *sample_rate,
+                                NUM_BARS,
+                            );
+                            let _ = event_tx.send(AudioEvent::Spectrum(spectrum));
+                            fft_mono_buf.clear();
+                        }
 
                         ring_buf.write(&samples);
                         samples_written.fetch_add(
@@ -379,4 +403,69 @@ fn start_playback(
         sample_rate: info.sample_rate,
         _stream: stream,
     }
+}
+
+/// Compute frequency spectrum bars from time-domain samples using FFT.
+fn compute_spectrum(
+    samples: &[f32],
+    fft: &std::sync::Arc<dyn rustfft::Fft<f32>>,
+    sample_rate: u32,
+    num_bars: usize,
+) -> Vec<f32> {
+    use rustfft::num_complex::Complex;
+
+    let n = samples.len();
+
+    // Apply Hann window and create complex input.
+    let mut input: Vec<Complex<f32>> = samples
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| {
+            let window = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / n as f32).cos());
+            Complex::new(s * window, 0.0)
+        })
+        .collect();
+
+    fft.process(&mut input);
+
+    // Compute magnitudes for positive frequencies only.
+    let half = n / 2;
+    let magnitudes: Vec<f32> = input[..half].iter().map(|c| c.norm()).collect();
+
+    // Group into bars using logarithmic frequency scale (like CAVA).
+    let min_freq = 50.0_f32;
+    let max_freq = (sample_rate as f32 / 2.0).min(16000.0);
+    let freq_per_bin = sample_rate as f32 / n as f32;
+
+    let mut bars = vec![0.0_f32; num_bars];
+    for (bar_idx, bar) in bars.iter_mut().enumerate() {
+        let f_low = min_freq * (max_freq / min_freq).powf(bar_idx as f32 / num_bars as f32);
+        let f_high =
+            min_freq * (max_freq / min_freq).powf((bar_idx + 1) as f32 / num_bars as f32);
+
+        let bin_low = (f_low / freq_per_bin) as usize;
+        let bin_high = ((f_high / freq_per_bin) as usize).min(half - 1);
+
+        let mut sum = 0.0;
+        let mut count = 0;
+        for bin in bin_low..=bin_high {
+            if bin < half {
+                sum += magnitudes[bin];
+                count += 1;
+            }
+        }
+
+        *bar = if count > 0 { sum / count as f32 } else { 0.0 };
+    }
+
+    // Convert to dB-like scale and normalize for display.
+    for bar in &mut bars {
+        // Add small epsilon to avoid log(0), convert to dB-ish scale.
+        *bar = (20.0 * (*bar + 1e-10).log10()).max(-60.0);
+        // Map -60dB..0dB → 0.0..1.0
+        *bar = (*bar + 60.0) / 60.0;
+        *bar = bar.clamp(0.0, 1.0);
+    }
+
+    bars
 }

@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Widget};
+use ratatui::widgets::{List, ListItem, Paragraph, Widget};
 
 use crate::library::types::Library;
 
@@ -150,13 +150,7 @@ pub struct LibraryTab<'a> {
 
 impl<'a> Widget for LibraryTab<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" Library ");
-
-        let inner = block.inner(area);
-        block.render(area, buf);
+        let inner = area;
 
         if inner.height < 2 || inner.width < 10 {
             return;

@@ -44,4 +44,6 @@ pub enum AudioEvent {
     Error(String),
     /// Decoded audio level for simple visualizer (RMS of recent samples, 0.0-1.0).
     Level(f32),
+    /// Frequency spectrum bars for CAVA-style visualizer (normalized 0.0-1.0).
+    Spectrum(Vec<f32>),
 }

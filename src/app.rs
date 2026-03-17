@@ -163,7 +163,7 @@ impl App {
             }
 
             // Update album art if track changed.
-            if let Some(ref path) = self.playing.file_path.clone() {
+            if let Some(ref path) = self.playing.file_path {
                 self.album_art.update(path, self.graphics_protocol, 30, 15);
             }
 
@@ -295,6 +295,14 @@ impl App {
                 Action::AudioCmd(cmd) => {
                     if self.active_tab == 2 && matches!(cmd, AudioCommand::TogglePlayPause) {
                         self.pomodoro.toggle_pause();
+                    } else if matches!(cmd, AudioCommand::TogglePlayPause)
+                        && !self.playing.is_playing
+                        && self.playing.file_path.is_none()
+                    {
+                        // Nothing loaded — start playing from queue if available.
+                        if let Some(path) = self.queue.current_track().cloned() {
+                            self.engine.send(AudioCommand::Play(path));
+                        }
                     } else {
                         self.engine.send(cmd);
                     }
@@ -414,14 +422,15 @@ impl App {
             1 => {
                 if let LibraryView::Tracks { .. } = &self.library_state.view {
                     if let Some(path) = self.library_state.selected_track_path() {
-                        self.queue.push(path.clone());
-                        if !self.playing.is_playing && self.playing.file_path.is_none() {
-                            self.engine.send(AudioCommand::Play(path));
+                        // Check if track is already in queue.
+                        if let Some(idx) = self.queue.tracks().iter().position(|p| p == &path) {
+                            self.queue.set_current(idx);
                         } else {
+                            self.queue.push(path.clone());
                             let idx = self.queue.tracks().len() - 1;
                             self.queue.set_current(idx);
-                            self.engine.send(AudioCommand::Play(path));
                         }
+                        self.engine.send(AudioCommand::Play(path));
                     }
                 } else {
                     self.library_state.enter();
@@ -448,6 +457,11 @@ impl App {
         match self.active_tab {
             1 => self.library_state.back(),
             2 => self.pomodoro.stop(),
+            4 => {
+                if self.settings_state.editing {
+                    self.settings_state.cancel_edit();
+                }
+            }
             _ => {}
         }
     }
@@ -471,6 +485,10 @@ impl App {
             }
             return;
         }
+        if self.active_tab == 4 && self.settings_state.editing {
+            self.settings_state.edit_push(ch);
+            return;
+        }
         if self.active_tab == 3 {
             // Search tab: type into search box.
             self.search_state.push_char(ch);
@@ -492,6 +510,10 @@ impl App {
     }
 
     fn handle_backspace(&mut self) {
+        if self.active_tab == 4 && self.settings_state.editing {
+            self.settings_state.edit_pop();
+            return;
+        }
         if self.active_tab == 3 {
             self.search_state.pop_char();
             self.search_state
@@ -613,9 +635,11 @@ impl App {
                 }
                 AudioEvent::Stopped => {
                     self.playing.is_playing = false;
+                    self.playing.spectrum.clear();
                 }
                 AudioEvent::Finished => {
                     self.playing.is_playing = false;
+                    self.playing.spectrum.clear();
                     self.play_next();
                 }
                 AudioEvent::Error(msg) => {
@@ -624,6 +648,9 @@ impl App {
                 AudioEvent::Level(level) => {
                     self.playing.level =
                         self.playing.level * 0.7 + level * 0.3;
+                }
+                AudioEvent::Spectrum(ref bars) => {
+                    self.playing.update_spectrum(bars);
                 }
             }
         }

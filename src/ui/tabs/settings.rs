@@ -2,7 +2,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Widget};
+use ratatui::widgets::{List, ListItem, Paragraph, Widget};
+use std::path::PathBuf;
 
 use crate::config::settings::{RepeatMode, Settings, ShuffleMode};
 
@@ -11,7 +12,6 @@ use crate::config::settings::{RepeatMode, Settings, ShuffleMode};
 struct SettingItem {
     label: String,
     value: String,
-    editable: bool,
 }
 
 /// State for the Settings tab.
@@ -36,25 +36,46 @@ impl Default for SettingsState {
 
 impl SettingsState {
     pub fn move_up(&mut self) {
-        if self.selected > 0 {
+        if !self.editing && self.selected > 0 {
             self.selected -= 1;
         }
     }
 
     pub fn move_down(&mut self, max: usize) {
-        if self.selected + 1 < max {
+        if !self.editing && self.selected + 1 < max {
             self.selected += 1;
         }
     }
 
-    /// Toggle the selected setting (for boolean/enum settings).
+    /// Toggle or start editing the selected setting.
     pub fn toggle(&mut self, settings: &mut Settings) {
+        if self.editing {
+            // Save the edit.
+            self.apply_edit(settings);
+            return;
+        }
+
         match self.selected {
-            // 0 = music directory (needs text edit, skip toggle)
-            // 1 = volume (needs text edit, skip toggle)
-            // 2 = seek step (needs text edit, skip toggle)
+            0 => {
+                // Music directory: enter edit mode.
+                self.editing = true;
+                self.edit_buffer = settings
+                    .music_directory
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+            }
+            1 => {
+                // Volume: enter edit mode.
+                self.editing = true;
+                self.edit_buffer = format!("{}", (settings.default_volume * 100.0).round() as u32);
+            }
+            2 => {
+                // Seek step: enter edit mode.
+                self.editing = true;
+                self.edit_buffer = format!("{}", settings.seek_step_secs);
+            }
             3 => {
-                // Repeat mode: cycle Off → All → One → Off
                 settings.repeat_mode = match settings.repeat_mode {
                     RepeatMode::Off => RepeatMode::All,
                     RepeatMode::All => RepeatMode::One,
@@ -62,14 +83,12 @@ impl SettingsState {
                 };
             }
             4 => {
-                // Shuffle: toggle
                 settings.shuffle = match settings.shuffle {
                     ShuffleMode::Off => ShuffleMode::On,
                     ShuffleMode::On => ShuffleMode::Off,
                 };
             }
             5 => {
-                // Theme: cycle through known themes
                 settings.theme = match settings.theme.as_str() {
                     "default" => "catppuccin".into(),
                     "catppuccin" => "gruvbox".into(),
@@ -78,6 +97,69 @@ impl SettingsState {
                 };
             }
             _ => {}
+        }
+    }
+
+    /// Apply the current edit buffer to the corresponding setting.
+    fn apply_edit(&mut self, settings: &mut Settings) {
+        self.editing = false;
+        match self.selected {
+            0 => {
+                let trimmed = self.edit_buffer.trim();
+                if trimmed.is_empty() {
+                    settings.music_directory = None;
+                } else {
+                    let expanded = if trimmed.starts_with('~') {
+                        if let Some(home) = dirs_home() {
+                            home.join(trimmed.strip_prefix("~/").unwrap_or(trimmed))
+                        } else {
+                            PathBuf::from(trimmed)
+                        }
+                    } else {
+                        PathBuf::from(trimmed)
+                    };
+                    settings.music_directory = Some(expanded);
+                }
+                self.status_message = Some("Music directory updated".into());
+            }
+            1 => {
+                if let Ok(pct) = self.edit_buffer.trim().parse::<u32>() {
+                    settings.default_volume = (pct.min(100) as f32) / 100.0;
+                    self.status_message = Some(format!("Volume set to {}%", pct.min(100)));
+                } else {
+                    self.status_message = Some("Invalid volume (enter 0-100)".into());
+                }
+            }
+            2 => {
+                if let Ok(secs) = self.edit_buffer.trim().parse::<u64>() {
+                    settings.seek_step_secs = secs.max(1);
+                    self.status_message = Some(format!("Seek step set to {}s", secs.max(1)));
+                } else {
+                    self.status_message = Some("Invalid seek step (enter seconds)".into());
+                }
+            }
+            _ => {}
+        }
+        self.edit_buffer.clear();
+    }
+
+    /// Cancel editing without applying.
+    pub fn cancel_edit(&mut self) {
+        self.editing = false;
+        self.edit_buffer.clear();
+    }
+
+    /// Push a character to the edit buffer (when editing).
+    pub fn edit_push(&mut self, ch: char) {
+        if self.editing {
+            self.edit_buffer.push(ch);
+        }
+    }
+
+    /// Remove last character from the edit buffer.
+    pub fn edit_pop(&mut self) {
+        if self.editing {
+            self.edit_buffer.pop();
         }
     }
 
@@ -90,17 +172,14 @@ impl SettingsState {
                     .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| "(not set)".into()),
-                editable: true,
             },
             SettingItem {
                 label: "Default Volume".into(),
                 value: format!("{}%", (settings.default_volume * 100.0) as u8),
-                editable: true,
             },
             SettingItem {
                 label: "Seek Step".into(),
                 value: format!("{}s", settings.seek_step_secs),
-                editable: true,
             },
             SettingItem {
                 label: "Repeat".into(),
@@ -110,7 +189,6 @@ impl SettingsState {
                     RepeatMode::One => "One",
                 }
                 .into(),
-                editable: true,
             },
             SettingItem {
                 label: "Shuffle".into(),
@@ -119,12 +197,10 @@ impl SettingsState {
                     ShuffleMode::On => "On",
                 }
                 .into(),
-                editable: true,
             },
             SettingItem {
                 label: "Theme".into(),
                 value: settings.theme.clone(),
-                editable: true,
             },
         ]
     }
@@ -134,6 +210,11 @@ impl SettingsState {
     }
 }
 
+/// Get the user's home directory.
+fn dirs_home() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
+}
+
 pub struct SettingsTab<'a> {
     pub state: &'a SettingsState,
     pub settings: &'a Settings,
@@ -141,13 +222,7 @@ pub struct SettingsTab<'a> {
 
 impl<'a> Widget for SettingsTab<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" Settings ");
-
-        let inner = block.inner(area);
-        block.render(area, buf);
+        let inner = area;
 
         if inner.height < 4 || inner.width < 20 {
             return;
@@ -165,7 +240,7 @@ impl<'a> Widget for SettingsTab<'a> {
         // Header.
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "Settings",
+                " Settings",
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -181,6 +256,8 @@ impl<'a> Widget for SettingsTab<'a> {
             .enumerate()
             .map(|(i, item)| {
                 let is_selected = i == self.state.selected;
+                let is_editing = is_selected && self.state.editing;
+
                 let label_style = if is_selected {
                     Style::default()
                         .fg(Color::Cyan)
@@ -188,19 +265,39 @@ impl<'a> Widget for SettingsTab<'a> {
                 } else {
                     Style::default().fg(Color::White)
                 };
-                let value_style = if is_selected {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
 
                 let prefix = if is_selected { " > " } else { "   " };
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{prefix}{:<20}", item.label), label_style),
-                    Span::styled(&item.value, value_style),
-                ]))
+
+                if is_editing {
+                    let cursor = "_";
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("{prefix}{:<20}", item.label), label_style),
+                        Span::styled(
+                            &self.state.edit_buffer,
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            cursor,
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::SLOW_BLINK),
+                        ),
+                    ]))
+                } else {
+                    let value_style = if is_selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("{prefix}{:<20}", item.label), label_style),
+                        Span::styled(&item.value, value_style),
+                    ]))
+                }
             })
             .collect();
 
@@ -210,7 +307,7 @@ impl<'a> Widget for SettingsTab<'a> {
         // Status message.
         if let Some(ref msg) = self.state.status_message {
             Paragraph::new(Line::from(Span::styled(
-                msg.as_str(),
+                format!(" {msg}"),
                 Style::default().fg(Color::Green),
             )))
             .render(chunks[2], buf);

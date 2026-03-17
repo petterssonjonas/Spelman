@@ -49,6 +49,9 @@ tracing-subscriber = "0.3"
 # XDG directories
 directories = "6"
 
+# FFT for spectrum visualizer
+rustfft = "6"
+
 # Image processing (album art)
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
