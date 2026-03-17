@@ -1,9 +1,12 @@
 name: Packages
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build packages for (e.g. v0.2.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
@@ -29,6 +34,7 @@ jobs:
       - name: Upload .deb to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag }}
           files: target/debian/*.deb
 
   rpm:
@@ -37,6 +43,8 @@ jobs:
       image: fedora:42
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Install build dependencies
         run: |
@@ -47,7 +55,8 @@ jobs:
 
       - name: Create source tarball
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          VERSION=${{ inputs.tag }}
+          VERSION=${VERSION#v}
           mkdir -p Spelman-${VERSION}
           cp -r src Cargo.toml Cargo.lock README.md LICENSE packaging Spelman-${VERSION}/
           tar czf $HOME/rpmbuild/SOURCES/Spelman-${VERSION}.tar.gz Spelman-${VERSION}
@@ -63,12 +72,15 @@ jobs:
       - name: Upload .rpm to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag }}
           files: rpms/*.rpm
 
   flatpak:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Install Flatpak and flatpak-builder
         run: |
@@ -85,7 +97,8 @@ jobs:
 
       - name: Update manifest source URL
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          VERSION=${{ inputs.tag }}
+          VERSION=${VERSION#v}
           sed -i "s|archive/refs/tags/v[0-9.]*|archive/refs/tags/v${VERSION}|" packaging/com.github.spelman.yml
 
       - name: Build Flatpak
@@ -99,4 +112,61 @@ jobs:
       - name: Upload Flatpak to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag }}
           files: spelman.flatpak
+
+  homebrew:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary (arm64)
+        run: cargo build --release
+
+      - name: Strip binary
+        run: strip target/release/spelman
+
+      - name: Package macOS binary
+        run: |
+          VERSION=${{ inputs.tag }}
+          VERSION=${VERSION#v}
+          tar czf spelman-macos-arm64-${VERSION}.tar.gz \
+            -C target/release spelman \
+            -C "$GITHUB_WORKSPACE" README.md LICENSE
+
+      - name: Generate Homebrew formula
+        run: |
+          VERSION=${{ inputs.tag }}
+          VERSION=${VERSION#v}
+          SHA=$(shasum -a 256 spelman-macos-arm64-${VERSION}.tar.gz | awk '{print $1}')
+          cat > spelman.rb <<FORMULA
+          class Spelman < Formula
+            desc "Terminal music player with spectrum visualizer and pomodoro timer"
+            homepage "https://github.com/petterssonjonas/Spelman"
+            url "https://github.com/petterssonjonas/Spelman/archive/refs/tags/${{ inputs.tag }}.tar.gz"
+            license "MIT"
+
+            depends_on "rust" => :build
+
+            def install
+              system "cargo", "install", *std_cargo_args
+            end
+
+            test do
+              assert_match "spelman", shell_output("#{bin}/spelman --version")
+            end
+          end
+          FORMULA
+
+      - name: Upload binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            spelman-macos-arm64-*.tar.gz
+            spelman.rb
