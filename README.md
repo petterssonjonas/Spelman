@@ -1,33 +1,20 @@
 # Spelman
+## [Swedish] The one who plays.
 
-An AI enabled terminal music player Vibe coded in Rust.
+An modern featured terminal music player vibe-coded in Rust.
 
-Generate lofi music as you work, to match your mood. Tell it to make it a bit more mellow, or faster or make it jazz... 
-
-Allow it to be your Pomodoro timer perhaps.
-
-Tell it your doing a 10 minute workout. Get something vigorous.
-
-Ask it to pull the latest news pod perhaps.
+AI Features planned, ACE-Step integation for local AI or BYOK for your cloud service.
 
 ## Features
 
 - **Audio playback** — MP3, FLAC, OGG, Opus, WAV, AAC via symphonia (pure Rust decoding)
 - **Low-latency audio** — cpal output with lock-free ring buffer, no allocations in the audio callback
-- **Volume control** — smooth 5ms ramping to avoid clicks/pops
+- **Visualizers** — Both Cava and Chroma
+- **Real album art images** — ASCII Art for terminals that dont support kitty images.
 - **Metadata display** — title, artist, album via lofty
 - **TUI** — ratatui-based interface with tab bar, progress bar, level meter
-- **Vim-style keybindings** — `Space` play/pause, `h/l` seek, `+/-` volume, `q` quit
-
-## Usage
-
-```sh
-# Play a file
-spelman song.flac
-
-# Open without a file (library mode — coming soon)
-spelman
-```
+- **Pomodoro timer** — A pomodoro popup overlay
+- **Built in EQ** — popup a real-time equalizer with presets
 
 ## Building
 
