@@ -106,7 +106,7 @@ impl LibraryState {
         match &self.view {
             LibraryView::Artists => match self.sort_mode {
                 LibrarySortMode::Artists => self.library.artists.len(),
-                LibrarySortMode::Albums => self.all_albums().len(),
+                LibrarySortMode::Albums => self.library.artists.values().map(|a| a.len()).sum(),
                 LibrarySortMode::Songs => self.library.track_count(),
             },
             LibraryView::Albums { artist } => self.library.albums_for(artist).len(),
@@ -345,6 +345,7 @@ impl LibraryState {
 pub struct LibraryTab<'a> {
     pub state: &'a LibraryState,
     pub playlist_key: &'a str,
+    pub focus_tabbar: bool,
 }
 
 impl<'a> Widget for LibraryTab<'a> {
@@ -478,7 +479,7 @@ impl<'a> Widget for LibraryTab<'a> {
                     .iter()
                     .enumerate()
                     .map(|(i, name)| {
-                        let style = if i == self.state.selected {
+                        let style = if !self.focus_tabbar && i == self.state.selected {
                             Style::default()
                                 .fg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD | Modifier::REVERSED)
@@ -527,7 +528,7 @@ impl<'a> Widget for LibraryTab<'a> {
                     .into_iter()
                     .enumerate()
                     .map(|(i, (artist_name, album))| {
-                        let style = if i == self.state.selected {
+                        let style = if !self.focus_tabbar && i == self.state.selected {
                             Style::default()
                                 .fg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD | Modifier::REVERSED)
@@ -572,7 +573,7 @@ impl<'a> Widget for LibraryTab<'a> {
                     .into_iter()
                     .enumerate()
                     .map(|(i, (artist_name, track))| {
-                        let style = if i == self.state.selected {
+                        let style = if !self.focus_tabbar && i == self.state.selected {
                             Style::default()
                                 .fg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD | Modifier::REVERSED)
@@ -611,7 +612,7 @@ impl<'a> Widget for LibraryTab<'a> {
                 .iter()
                 .enumerate()
                 .map(|(i, album)| {
-                    let style = if i == self.state.selected {
+                    let style = if !self.focus_tabbar && i == self.state.selected {
                         Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD | Modifier::REVERSED)
@@ -653,7 +654,7 @@ impl<'a> Widget for LibraryTab<'a> {
                         .iter()
                         .enumerate()
                         .map(|(i, track)| {
-                            let style = if i == self.state.selected {
+                            let style = if !self.focus_tabbar && i == self.state.selected {
                                 Style::default()
                                     .fg(Color::Cyan)
                                     .add_modifier(Modifier::BOLD | Modifier::REVERSED)
@@ -705,9 +706,4 @@ impl<'a> Widget for LibraryTab<'a> {
     }
 }
 
-fn format_duration(d: std::time::Duration) -> String {
-    let total_secs = d.as_secs();
-    let mins = total_secs / 60;
-    let secs = total_secs % 60;
-    format!("{mins}:{secs:02}")
-}
+use crate::util::format::format_duration;

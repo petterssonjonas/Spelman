@@ -44,8 +44,11 @@ impl Widget for ProgressBar {
 
         let time_left = format_duration(self.elapsed);
         let time_right = format_duration(self.total);
-        let bar_width =
-            area.width as usize - time_left.len() - time_right.len() - 2;
+        let overhead = time_left.len() + time_right.len() + 2;
+        if (area.width as usize) <= overhead {
+            return;
+        }
+        let bar_width = area.width as usize - overhead;
 
         if bar_width < 4 {
             return;
@@ -69,19 +72,10 @@ impl Widget for ProgressBar {
 
         // Render bar.
         let bar_x = area.x + time_left.len() as u16 + 1;
-        for i in 0..bar_width {
-            let ch = if i < filled {
-                self.filled_char
-            } else {
-                self.empty_char
-            };
-            let style = if i < filled {
-                self.style
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            buf.set_string(bar_x + i as u16, area.y, ch.to_string(), style);
-        }
+        let filled_str: String = std::iter::repeat(self.filled_char).take(filled).collect();
+        let empty_str: String = std::iter::repeat(self.empty_char).take(bar_width - filled).collect();
+        buf.set_string(bar_x, area.y, &filled_str, self.style);
+        buf.set_string(bar_x + filled as u16, area.y, &empty_str, Style::default().fg(Color::DarkGray));
 
         // Render time right.
         let right_x = bar_x + bar_width as u16 + 1;
@@ -94,9 +88,4 @@ impl Widget for ProgressBar {
     }
 }
 
-fn format_duration(d: Duration) -> String {
-    let total_secs = d.as_secs();
-    let mins = total_secs / 60;
-    let secs = total_secs % 60;
-    format!("{mins}:{secs:02}")
-}
+use crate::util::format::format_duration;

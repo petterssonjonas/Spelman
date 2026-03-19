@@ -245,7 +245,7 @@ pub fn string_to_key(s: &str) -> Option<KeyCode> {
             s[1..].parse::<u8>().ok().map(KeyCode::F)
         }
         s if s.chars().count() == 1 => {
-            Some(KeyCode::Char(s.chars().next().unwrap()))
+            s.chars().next().map(KeyCode::Char)
         }
         _ => None,
     }

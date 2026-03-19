@@ -187,6 +187,8 @@ pub struct HomeTab<'a> {
     pub theme: &'a ThemeColors,
     /// The key string for the keybindings popup (e.g. "K").
     pub keybindings_key: &'a str,
+    /// When true, focus is on the tab bar — no content item is painted as selected.
+    pub focus_tabbar: bool,
 }
 
 /// Height of the banner area (1 spacer above + art + 1 spacer below), or 0 if not enough room.
@@ -283,7 +285,7 @@ impl<'a> HomeTab<'a> {
             return;
         }
 
-        let is_active = self.state.pane == HomePane::RecentlyPlayed;
+        let is_active = !self.focus_tabbar && self.state.pane == HomePane::RecentlyPlayed;
         let header_style = if is_active {
             Style::default().fg(accent).add_modifier(Modifier::BOLD)
         } else {
@@ -352,7 +354,7 @@ impl<'a> HomeTab<'a> {
             return;
         }
 
-        let is_active = self.state.pane == HomePane::Playlists;
+        let is_active = !self.focus_tabbar && self.state.pane == HomePane::Playlists;
         let header_style = if is_active {
             Style::default().fg(accent).add_modifier(Modifier::BOLD)
         } else {

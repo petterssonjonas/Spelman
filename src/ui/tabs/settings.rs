@@ -185,6 +185,7 @@ fn dirs_home() -> Option<PathBuf> {
 pub struct SettingsTab<'a> {
     pub state: &'a SettingsState,
     pub settings: &'a Settings,
+    pub focus_tabbar: bool,
 }
 
 impl<'a> Widget for SettingsTab<'a> {
@@ -219,7 +220,7 @@ impl<'a> Widget for SettingsTab<'a> {
         // Base settings.
         let base_items = base_setting_items(self.settings);
         for (i, item) in base_items.iter().enumerate() {
-            let is_selected = i == self.state.selected;
+            let is_selected = !self.focus_tabbar && i == self.state.selected;
             let is_editing = is_selected && self.state.editing;
             list_items.push(render_setting_row(
                 &item.0, &item.1, is_selected, is_editing,
@@ -228,7 +229,7 @@ impl<'a> Widget for SettingsTab<'a> {
         }
 
         // Separator.
-        let sep_selected = self.state.selected == BASE_ITEM_COUNT;
+        let sep_selected = !self.focus_tabbar && self.state.selected == BASE_ITEM_COUNT;
         let sep_style = if sep_selected {
             Style::default().fg(Color::Cyan)
         } else {
@@ -242,7 +243,7 @@ impl<'a> Widget for SettingsTab<'a> {
         // Keybinding rows.
         for (i, &action) in BindableAction::ALL.iter().enumerate() {
             let row_idx = BASE_ITEM_COUNT + SEPARATOR_COUNT + i;
-            let is_selected = row_idx == self.state.selected;
+            let is_selected = !self.focus_tabbar && row_idx == self.state.selected;
             let is_rebinding = is_selected && self.state.rebinding;
 
             let keys = self.settings.keybindings.keys_for(action);

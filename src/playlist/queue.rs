@@ -122,14 +122,17 @@ impl Queue {
 
     fn rebuild_shuffle(&mut self) {
         self.shuffle_order = (0..self.tracks.len()).collect();
-        // Simple Fisher-Yates using a basic LCG (no external dep needed).
-        let mut seed = std::time::SystemTime::now()
+        // Fisher-Yates using a basic LCG seeded from multiple entropy sources.
+        let time_seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
+        // Mix in the address of the shuffle_order Vec for per-instance entropy.
+        let addr_seed = self.shuffle_order.as_ptr() as u64;
+        let mut seed = time_seed ^ addr_seed ^ 0xdeadbeef_cafebabe_u64;
 
         for i in (1..self.shuffle_order.len()).rev() {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let j = (seed >> 33) as usize % (i + 1);
             self.shuffle_order.swap(i, j);
         }
@@ -208,36 +211,3 @@ impl Queue {
     }
 }
 
-/// Trait for anything that can provide the next/previous track to play.
-///
-/// `Queue` is the standard implementation, but future AI-generated or
-/// context-aware queue sources can implement this trait and plug into the
-/// player pipeline without changes to [`PlayerCoordinator`] or [`App`].
-pub trait QueueSource {
-    /// Advance to the next track and return its path, respecting shuffle and repeat.
-    fn next_track(&mut self, shuffle: ShuffleMode, repeat: RepeatMode) -> Option<PathBuf>;
-    /// Step back to the previous track and return its path.
-    fn prev_track(&mut self) -> Option<PathBuf>;
-    /// Return the currently active track path without advancing.
-    fn current_track(&self) -> Option<&PathBuf>;
-    /// Return `true` if there are no tracks to play.
-    fn is_empty(&self) -> bool;
-}
-
-impl QueueSource for Queue {
-    fn next_track(&mut self, shuffle: ShuffleMode, repeat: RepeatMode) -> Option<PathBuf> {
-        self.next_with_mode(shuffle, repeat).cloned()
-    }
-
-    fn prev_track(&mut self) -> Option<PathBuf> {
-        self.prev().cloned()
-    }
-
-    fn current_track(&self) -> Option<&PathBuf> {
-        Queue::current_track(self)
-    }
-
-    fn is_empty(&self) -> bool {
-        Queue::is_empty(self)
-    }
-}

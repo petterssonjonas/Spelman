@@ -5,15 +5,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, Paragraph, Widget};
 use std::path::PathBuf;
 
-use crate::library::types::{Library, Track};
+use crate::library::types::Library;
 
 /// State for the Search tab.
 #[derive(Debug, Clone)]
 pub struct SearchState {
     /// Current search query.
     pub query: String,
-    /// Tracks matching the current query (cloned from library).
-    pub results: Vec<Track>,
+    /// Flat indices into the library's `all_tracks()` iterator for matching tracks,
+    /// ordered by best score descending.
+    pub result_indices: Vec<usize>,
     /// Index of the selected result.
     pub selected: usize,
     /// Scroll offset for the results list.
@@ -26,7 +27,7 @@ impl Default for SearchState {
     fn default() -> Self {
         Self {
             query: String::new(),
-            results: Vec::new(),
+            result_indices: Vec::new(),
             selected: 0,
             scroll_offset: 0,
             is_active: true,
@@ -112,12 +113,17 @@ fn fuzzy_score(query: &str, target: &str) -> Option<i32> {
 }
 
 impl SearchState {
+    /// Number of results.
+    pub fn result_count(&self) -> usize {
+        self.result_indices.len()
+    }
+
     /// Filter library tracks using fuzzy matching against artist, album, and
     /// title. Results are sorted by best score descending. Clears results when
-    /// the query is empty.
+    /// the query is empty. Stores flat indices instead of cloning tracks.
     pub fn update_results(&mut self, library: &Library) {
         if self.query.is_empty() {
-            self.results.clear();
+            self.result_indices.clear();
             self.selected = 0;
             self.scroll_offset = 0;
             return;
@@ -125,9 +131,10 @@ impl SearchState {
 
         let query_lower = self.query.to_lowercase();
 
-        let mut scored: Vec<(i32, Track)> = library
+        let mut scored: Vec<(i32, usize)> = library
             .all_tracks()
-            .filter_map(|track| {
+            .enumerate()
+            .filter_map(|(idx, track)| {
                 let best = [
                     fuzzy_score(&query_lower, &track.artist.to_lowercase()),
                     fuzzy_score(&query_lower, &track.album.to_lowercase()),
@@ -137,21 +144,21 @@ impl SearchState {
                 .flatten()
                 .max();
 
-                best.map(|score| (score, track.clone()))
+                best.map(|score| (score, idx))
             })
             .collect();
 
         // Sort best matches first.
         scored.sort_unstable_by(|a, b| b.0.cmp(&a.0));
 
-        self.results = scored.into_iter().map(|(_, track)| track).collect();
+        self.result_indices = scored.into_iter().map(|(_, idx)| idx).collect();
 
         // Clamp selection to valid range.
-        if self.results.is_empty() {
+        if self.result_indices.is_empty() {
             self.selected = 0;
             self.scroll_offset = 0;
-        } else if self.selected >= self.results.len() {
-            self.selected = self.results.len() - 1;
+        } else if self.selected >= self.result_indices.len() {
+            self.selected = self.result_indices.len() - 1;
         }
     }
 
@@ -174,19 +181,21 @@ impl SearchState {
 
     /// Move selection down by one.
     pub fn move_down(&mut self) {
-        if !self.results.is_empty() && self.selected < self.results.len() - 1 {
+        if !self.result_indices.is_empty() && self.selected < self.result_indices.len() - 1 {
             self.selected += 1;
         }
     }
 
-    /// Get the file path of the currently selected track.
-    pub fn selected_track_path(&self) -> Option<PathBuf> {
-        self.results.get(self.selected).map(|t| t.path.clone())
+    /// Get the file path of the currently selected track from the library.
+    pub fn selected_track_path_from(&self, library: &Library) -> Option<PathBuf> {
+        let &flat_idx = self.result_indices.get(self.selected)?;
+        library.all_tracks().nth(flat_idx).map(|t| t.path.clone())
     }
 }
 
 pub struct SearchTab<'a> {
     pub state: &'a SearchState,
+    pub library: &'a Library,
 }
 
 impl<'a> Widget for SearchTab<'a> {
@@ -228,7 +237,7 @@ impl<'a> Widget for SearchTab<'a> {
         let count_text = if self.state.query.is_empty() {
             String::from(" Type to search...")
         } else {
-            format!(" {} results", self.state.results.len())
+            format!(" {} results", self.state.result_indices.len())
         };
         Paragraph::new(Line::from(Span::styled(
             count_text,
@@ -237,9 +246,12 @@ impl<'a> Widget for SearchTab<'a> {
         .render(chunks[1], buf);
 
         // Results list.
-        if self.state.results.is_empty() {
+        if self.state.result_indices.is_empty() {
             return;
         }
+
+        // Collect library tracks into a vec for indexed access.
+        let all_tracks: Vec<_> = self.library.all_tracks().collect();
 
         let visible_height = chunks[2].height as usize;
 
@@ -256,12 +268,13 @@ impl<'a> Widget for SearchTab<'a> {
 
         let items: Vec<ListItem> = self
             .state
-            .results
+            .result_indices
             .iter()
             .enumerate()
             .skip(scroll)
             .take(visible_height)
-            .map(|(i, track)| {
+            .filter_map(|(i, &flat_idx)| {
+                let track = all_tracks.get(flat_idx)?;
                 let style = if i == self.state.selected {
                     Style::default()
                         .fg(Color::Cyan)
@@ -274,7 +287,7 @@ impl<'a> Widget for SearchTab<'a> {
                     "  {} - {} ({})",
                     track.artist, track.title, track.album
                 );
-                ListItem::new(Line::from(Span::styled(display, style)))
+                Some(ListItem::new(Line::from(Span::styled(display, style))))
             })
             .collect();
 

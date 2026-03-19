@@ -142,16 +142,22 @@ impl EqState {
     ///
     /// Immediately copies the preset gains into `self.gains`.
     pub fn next_preset(&mut self) {
+        if EQ_PRESETS.is_empty() { return; }
         self.preset_index = (self.preset_index + 1) % EQ_PRESETS.len();
-        self.gains = EQ_PRESETS[self.preset_index].1;
+        if let Some(preset) = EQ_PRESETS.get(self.preset_index) {
+            self.gains = preset.1;
+        }
     }
 
     /// Go back to the previous preset, wrapping around.
     ///
     /// Immediately copies the preset gains into `self.gains`.
     pub fn prev_preset(&mut self) {
+        if EQ_PRESETS.is_empty() { return; }
         self.preset_index = (self.preset_index + EQ_PRESETS.len() - 1) % EQ_PRESETS.len();
-        self.gains = EQ_PRESETS[self.preset_index].1;
+        if let Some(preset) = EQ_PRESETS.get(self.preset_index) {
+            self.gains = preset.1;
+        }
     }
 
     /// Adjust `band`'s gain by `delta` dB, clamping the result to `[−12, +12]`.

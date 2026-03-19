@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crossbeam_channel::Sender;
 use rustfft::num_complex::Complex;
 
@@ -21,7 +23,7 @@ struct SpectrumAnalyser {
     /// Output bars, overwritten in place.
     bars: [f32; NUM_BARS],
     /// Mono accumulator — samples are pushed here from the decode loop.
-    fft_mono_buf: Vec<f32>,
+    fft_mono_buf: VecDeque<f32>,
     /// Pre-computed (bin_low, bin_high) inclusive ranges for each bar.
     bin_ranges: [(usize, usize); NUM_BARS],
     /// Hann window coefficients, pre-computed once.
@@ -64,7 +66,7 @@ impl SpectrumAnalyser {
             input: vec![Complex::new(0.0, 0.0); FFT_SIZE],
             magnitudes: vec![0.0; FFT_SIZE / 2],
             bars: [0.0; NUM_BARS],
-            fft_mono_buf: Vec::with_capacity(FFT_SIZE * 2),
+            fft_mono_buf: VecDeque::with_capacity(FFT_SIZE * 2),
             bin_ranges,
             hann,
         }
@@ -79,17 +81,20 @@ impl SpectrumAnalyser {
     ) -> Option<&[f32; NUM_BARS]> {
         for chunk in samples.chunks(channels) {
             let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
-            self.fft_mono_buf.push(mono);
+            self.fft_mono_buf.push_back(mono);
         }
 
         if self.fft_mono_buf.len() < FFT_SIZE {
             return None;
         }
 
+        // Make contiguous so we can slice; VecDeque::make_contiguous is O(1)
+        // when data hasn't wrapped, and O(n) only on the first wrap.
+        let contiguous = self.fft_mono_buf.make_contiguous();
         for (i, (dst, &src)) in self
             .input
             .iter_mut()
-            .zip(self.fft_mono_buf[..FFT_SIZE].iter())
+            .zip(contiguous[..FFT_SIZE].iter())
             .enumerate()
         {
             *dst = Complex::new(src * self.hann[i], 0.0);

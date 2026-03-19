@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,7 +14,6 @@ use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Terminal;
 
 use crate::config::settings::{BindableAction, Settings, key_to_string};
-use crate::coordinator::ai::AiCoordinator;
 use crate::coordinator::player::PlayerCoordinator;
 use crate::library::scanner::{self, ScanEvent};
 use crate::playlist::playlist::{Playlist, PlaylistManager};
@@ -42,7 +41,6 @@ const TAB_NAMES: [&str; TAB_COUNT] = [
 pub struct App {
     settings: Settings,
     player: PlayerCoordinator,
-    _ai: AiCoordinator,
     home_state: HomeState,
     library_state: LibraryState,
     playlists_state: PlaylistsState,
@@ -52,6 +50,7 @@ pub struct App {
     active_tab: usize,
     should_quit: bool,
     scan_rx: Option<crossbeam_channel::Receiver<ScanEvent>>,
+    scan_handle: Option<thread::JoinHandle<()>>,
     /// Store the progress bar's screen rect for mouse-click-to-seek.
     progress_bar_rect: Option<Rect>,
     /// Store the controls line rect (play/pause click target).
@@ -62,6 +61,8 @@ pub struct App {
     content_rect: Option<Rect>,
     /// Recently played track paths (most recent first).
     recent_tracks: Vec<PathBuf>,
+    /// Last recorded track path (to avoid re-recording on every frame).
+    last_recorded_path: Option<PathBuf>,
     /// Whether we're in "name the playlist" mode.
     naming_playlist: Option<PlaylistSource>,
     /// Buffer for typing the playlist name.
@@ -84,8 +85,10 @@ pub struct App {
     glimmer_last: Instant,
     /// Glimmer effect: when the current wave started, or None if idle.
     glimmer_wave: Option<Instant>,
-    /// Home tab: true when focus is on the tab bar (arrow keys switch tabs).
-    home_focus_tabbar: bool,
+    /// True when focus is on the tab bar (left/right switch tabs, content not selected).
+    focus_tabbar: bool,
+    /// Keybindings hint rect at bottom of Home tab (for mouse click).
+    keybindings_hint_rect: Option<Rect>,
 }
 
 /// Where a new playlist's tracks come from.
@@ -107,7 +110,6 @@ impl App {
         Self {
             settings,
             player,
-            _ai: AiCoordinator::new(),
             home_state: HomeState::default(),
             library_state: LibraryState::default(),
             playlists_state,
@@ -117,11 +119,13 @@ impl App {
             active_tab: 0,
             should_quit: false,
             scan_rx: None,
+            scan_handle: None,
             progress_bar_rect: None,
             controls_rect: None,
             tab_bar_rect: None,
             content_rect: None,
             recent_tracks,
+            last_recorded_path: None,
             naming_playlist: None,
             playlist_name_buf: String::new(),
             mouse_pos: (0, 0),
@@ -133,7 +137,8 @@ impl App {
             keybindings_visible: false,
             glimmer_last: Instant::now(),
             glimmer_wave: None,
-            home_focus_tabbar: false,
+            focus_tabbar: true,
+            keybindings_hint_rect: None,
         }
     }
 
@@ -159,18 +164,19 @@ impl App {
         let (tx, rx) = crossbeam_channel::unbounded();
         self.scan_rx = Some(rx);
 
-        thread::Builder::new()
+        let handle = thread::Builder::new()
             .name("library-scan".into())
             .spawn(move || {
                 scanner::scan_directory(&music_dir, tx);
             })
             .expect("Failed to spawn library scan thread");
+        self.scan_handle = Some(handle);
     }
 
     /// Record a track as recently played (max 50).
-    fn record_recent(&mut self, path: &PathBuf) {
+    fn record_recent(&mut self, path: &Path) {
         self.recent_tracks.retain(|p| p != path);
-        self.recent_tracks.insert(0, path.clone());
+        self.recent_tracks.insert(0, path.to_path_buf());
         self.recent_tracks.truncate(50);
     }
 
@@ -197,6 +203,15 @@ impl App {
     }
 
     pub fn run(&mut self) -> anyhow::Result<()> {
+        // Install a panic hook that restores the terminal before printing the panic.
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = input::disable_mouse();
+            let _ = disable_raw_mode();
+            let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
+            default_hook(info);
+        }));
+
         enable_raw_mode()?;
         crossterm::execute!(std::io::stdout(), EnterAlternateScreen)?;
         input::enable_mouse()?;
@@ -229,10 +244,15 @@ impl App {
             self.player.process_meta_events();
             self.process_scan_events();
 
-            // Track recently played.
-            if let Some(ref path) = self.player.playing.file_path {
-                let path = path.clone();
-                self.record_recent(&path);
+            // Track recently played (only when the track changes).
+            if self.player.playing.file_path != self.last_recorded_path {
+                if let Some(ref path) = self.player.playing.file_path {
+                    let path = path.clone();
+                    self.record_recent(&path);
+                    self.last_recorded_path = Some(path);
+                } else {
+                    self.last_recorded_path = None;
+                }
             }
 
             // Tick the pomodoro timer.
@@ -294,7 +314,6 @@ impl App {
                 let accent = tc.accent();
                 let text_color = tc.text();
                 let _dim = tc.text_dim();
-                let hover_color = tc.hover();
                 let highlight = tc.highlight();
 
                 // Tab bar — no number prefixes, just names.
@@ -342,6 +361,7 @@ impl App {
                                 playlists: &self.playlists_state.playlists,
                                 theme: &self.settings.theme_colors,
                                 keybindings_key: &kb_key,
+                                focus_tabbar: self.focus_tabbar,
                             },
                             content,
                         );
@@ -365,6 +385,14 @@ impl App {
                             y: below_y,
                             width: right_w,
                             height: below_h,
+                        });
+                        // Store keybindings hint rect for mouse click.
+                        let hint_y = content.y + content.height.saturating_sub(1);
+                        self.keybindings_hint_rect = Some(Rect {
+                            x: content.x,
+                            y: hint_y,
+                            width: content.width,
+                            height: 1,
                         });
                         self.progress_bar_rect = None;
                         self.controls_rect = None;
@@ -437,6 +465,7 @@ impl App {
                             LibraryTab {
                                 state: &self.library_state,
                                 playlist_key: &pl_key,
+                                focus_tabbar: self.focus_tabbar,
                             },
                             content,
                         );
@@ -449,6 +478,7 @@ impl App {
                             SettingsTab {
                                 state: &self.settings_state,
                                 settings: &self.settings,
+                                focus_tabbar: self.focus_tabbar,
                             },
                             content,
                         );
@@ -484,7 +514,7 @@ impl App {
                         width: popup.width.saturating_sub(2),
                         height: popup.height.saturating_sub(2),
                     };
-                    SearchTab { state: &self.search_state }.render(inner, buf);
+                    SearchTab { state: &self.search_state, library: &self.library_state.library }.render(inner, buf);
                 }
 
                 // Pomodoro popup (square, centered).
@@ -542,147 +572,12 @@ impl App {
                     frame.render_widget(Paragraph::new(naming_hint), footer_area);
                 }
 
-                // Hover effects — post-render buffer modifications.
-                let (mx, my) = self.mouse_pos;
-                let buf = frame.buffer_mut();
-
-                // Tab bar hover — underline the hovered tab label.
-                if let Some(tab_rect) = self.tab_bar_rect {
-                    if my == tab_rect.y {
-                        let mut x = tab_rect.x;
-                        for (i, name) in TAB_NAMES.iter().enumerate() {
-                            let label_len = format!(" {name} ").len() as u16;
-                            if i != self.active_tab
-                                && mx >= x
-                                && mx < x + label_len
-                            {
-                                for cx in x..x + label_len {
-                                    if let Some(cell) = buf.cell_mut((cx, my)) {
-                                        cell.set_style(
-                                            Style::default()
-                                                .fg(hover_color)
-                                                .add_modifier(Modifier::UNDERLINED),
-                                        );
-                                    }
-                                }
-                            }
-                            x += label_len;
-                        }
-                    }
-                }
-
-                // Controls line hover (play/pause area) — color text only.
-                if let Some(ctrl_rect) = self.controls_rect {
-                    if my == ctrl_rect.y
-                        && mx >= ctrl_rect.x
-                        && mx < ctrl_rect.x + ctrl_rect.width
-                    {
-                        for cx in ctrl_rect.x..ctrl_rect.x + ctrl_rect.width {
-                            if let Some(cell) = buf.cell_mut((cx, my)) {
-                                if !cell.symbol().trim().is_empty() {
-                                    cell.set_style(Style::default().fg(hover_color));
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Progress bar hover — color text only.
-                if let Some(bar_rect) = self.progress_bar_rect {
-                    if my == bar_rect.y
-                        && mx >= bar_rect.x
-                        && mx < bar_rect.x + bar_rect.width
-                    {
-                        for cx in bar_rect.x..bar_rect.x + bar_rect.width {
-                            if let Some(cell) = buf.cell_mut((cx, my)) {
-                                if !cell.symbol().trim().is_empty() {
-                                    cell.set_style(
-                                        Style::default()
-                                            .fg(highlight)
-                                            .add_modifier(Modifier::BOLD),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // List row hover — color only text cells, only on interactable rows,
-                // constrained to the pane the mouse is in.
-                if !self.search_visible && !self.pomodoro_visible && !self.keybindings_visible {
-                    let on_controls = self.controls_rect.is_some_and(|r| my == r.y);
-                    let on_progress = self.progress_bar_rect.is_some_and(|r| my == r.y);
-
-                    if !on_controls && !on_progress {
-                        match self.active_tab {
-                            0 => {
-                                // Home tab: hover only within the correct pane, skip headers and logo.
-                                let hover_pane = |pane_rect: Option<Rect>| -> Option<(u16, u16)> {
-                                    let r = pane_rect?;
-                                    // Header is the first row of each pane.
-                                    let list_y = r.y + 1;
-                                    if my >= list_y && my < r.y + r.height
-                                        && mx >= r.x && mx < r.x + r.width
-                                    {
-                                        Some((r.x, r.x + r.width))
-                                    } else {
-                                        None
-                                    }
-                                };
-                                if let Some((start_x, end_x)) = hover_pane(self.home_state.recent_rect)
-                                    .or_else(|| hover_pane(self.home_state.playlist_rect))
-                                {
-                                    for cx in start_x..end_x {
-                                        if let Some(cell) = buf.cell_mut((cx, my)) {
-                                            if !cell.symbol().trim().is_empty() {
-                                                cell.set_style(Style::default().fg(hover_color));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            2 | 3 => {
-                                // Library / Settings: skip header row and separator rows.
-                                if let Some(content_rect) = self.content_rect {
-                                    let header_y = content_rect.y;
-                                    if my > header_y
-                                        && my < content_rect.y + content_rect.height
-                                        && mx >= content_rect.x
-                                        && mx < content_rect.x + content_rect.width
-                                    {
-                                        // In Settings, skip the separator row ("── Keybindings ──").
-                                        let is_separator = if self.active_tab == 3 {
-                                            // The separator is at index BASE_ITEM_COUNT (6),
-                                            // need to account for scroll offset.
-                                            let visible_row = (my - header_y - 1) as usize;
-                                            let scroll = if self.settings_state.selected >= content_rect.height.saturating_sub(2) as usize {
-                                                self.settings_state.selected - content_rect.height.saturating_sub(2) as usize
-                                            } else {
-                                                0
-                                            };
-                                            visible_row + scroll == 6 // BASE_ITEM_COUNT
-                                        } else {
-                                            false
-                                        };
-
-                                        if !is_separator {
-                                            for cx in content_rect.x..content_rect.x + content_rect.width {
-                                                if let Some(cell) = buf.cell_mut((cx, my)) {
-                                                    if !cell.symbol().trim().is_empty() {
-                                                        cell.set_style(Style::default().fg(hover_color));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                // No post-render hover painting — mouse move syncs selection
+                // state directly, so the selected item is already painted correctly
+                // by the tab's render method using the same teal style.
 
                 // Glimmer effect — traveling brightness wave on Playing tab text.
+                let buf = frame.buffer_mut();
                 if self.active_tab == 1 {
                     if let (Some(progress), Some(content_rect)) = (glimmer_progress, self.content_rect) {
                         let art_rows = if self.player.album_art.has_art {
@@ -774,6 +669,7 @@ impl App {
                     if self.eq_state.visible {
                         self.eq_state.hovered_band = self.eq_state.band_at(col, row);
                     }
+                    self.handle_mouse_hover(col, row);
                 }
                 Action::None => {}
             }
@@ -795,7 +691,7 @@ impl App {
                 } else if self.keybindings_visible {
                     self.keybindings_visible = false;
                 } else {
-                    self.player.stop();
+                    self.player.shutdown();
                     self.should_quit = true;
                 }
             }
@@ -836,34 +732,52 @@ impl App {
             }
             TabNext => {
                 if self.naming_playlist.is_none() && !self.search_visible && !self.pomodoro_visible && !self.keybindings_visible {
-                    if self.active_tab == 0 && !self.home_focus_tabbar {
-                        // On Home tab list, Right switches panes instead of changing tab.
-                        self.home_state.switch_pane();
+                    // Left/Right in content: context-specific (e.g., sort mode, pane switch).
+                    if !self.focus_tabbar {
+                        match self.active_tab {
+                            0 => self.home_state.switch_pane(),
+                            2 => {
+                                if matches!(self.library_state.view, LibraryView::Artists)
+                                    && self.library_state.selected == 0
+                                {
+                                    // On breadcrumb row: cycle sort mode.
+                                    self.library_state.sort_mode = self.library_state.sort_mode.next();
+                                    self.library_state.scroll_offset = 0;
+                                }
+                            }
+                            _ => {}
+                        }
                     } else {
                         let prev = self.active_tab;
                         self.active_tab = (self.active_tab + 1) % TAB_COUNT;
-                        if self.active_tab == 0 {
-                            self.home_focus_tabbar = false;
-                            if prev != 0 {
-                                self.home_state.randomize_logo();
-                            }
+                        self.focus_tabbar = true;
+                        if self.active_tab == 0 && prev != 0 {
+                            self.home_state.randomize_logo();
                         }
                     }
                 }
             }
             TabPrev => {
                 if self.naming_playlist.is_none() && !self.search_visible && !self.pomodoro_visible && !self.keybindings_visible {
-                    if self.active_tab == 0 && !self.home_focus_tabbar {
-                        // On Home tab list, Left switches panes instead of changing tab.
-                        self.home_state.switch_pane();
+                    if !self.focus_tabbar {
+                        match self.active_tab {
+                            0 => self.home_state.switch_pane(),
+                            2 => {
+                                if matches!(self.library_state.view, LibraryView::Artists)
+                                    && self.library_state.selected == 0
+                                {
+                                    self.library_state.sort_mode = self.library_state.sort_mode.prev();
+                                    self.library_state.scroll_offset = 0;
+                                }
+                            }
+                            _ => {}
+                        }
                     } else {
                         let prev = self.active_tab;
                         self.active_tab = (self.active_tab + TAB_COUNT - 1) % TAB_COUNT;
-                        if self.active_tab == 0 {
-                            self.home_focus_tabbar = false;
-                            if prev != 0 {
-                                self.home_state.randomize_logo();
-                            }
+                        self.focus_tabbar = true;
+                        if self.active_tab == 0 && prev != 0 {
+                            self.home_state.randomize_logo();
                         }
                     }
                 }
@@ -882,7 +796,7 @@ impl App {
             Backspace => self.handle_backspace(),
             // Popup toggles.
             ToggleSearch => {
-                if !self.naming_playlist.is_some() {
+                if self.naming_playlist.is_none() {
                     self.search_visible = !self.search_visible;
                     self.pomodoro_visible = false;
                     self.keybindings_visible = false;
@@ -892,14 +806,14 @@ impl App {
                 }
             }
             TogglePomodoro => {
-                if !self.naming_playlist.is_some() {
+                if self.naming_playlist.is_none() {
                     self.pomodoro_visible = !self.pomodoro_visible;
                     self.search_visible = false;
                     self.keybindings_visible = false;
                 }
             }
             ToggleKeybindings => {
-                if !self.naming_playlist.is_some() {
+                if self.naming_playlist.is_none() {
                     self.keybindings_visible = !self.keybindings_visible;
                     self.search_visible = false;
                     self.pomodoro_visible = false;
@@ -1009,7 +923,7 @@ impl App {
     fn play_from_current_tab(&mut self) {
         // If search popup is open, play selected search result.
         if self.search_visible {
-            if let Some(path) = self.search_state.selected_track_path() {
+            if let Some(path) = self.search_state.selected_track_path_from(&self.library_state.library) {
                 self.player.enqueue_and_play(path);
             }
             return;
@@ -1092,17 +1006,17 @@ impl App {
         if self.pomodoro_visible {
             return;
         }
+        // From tab bar, pressing Down enters the content.
+        if self.focus_tabbar {
+            self.focus_tabbar = false;
+            return;
+        }
         match self.active_tab {
             0 => {
-                if self.home_focus_tabbar {
-                    // Focus moves from tab bar down into the list.
-                    self.home_focus_tabbar = false;
-                } else {
-                    self.home_state.move_down(
-                        self.recent_tracks.len(),
-                        self.playlists_state.playlists.len(),
-                    );
-                }
+                self.home_state.move_down(
+                    self.recent_tracks.len(),
+                    self.playlists_state.playlists.len(),
+                );
             }
             2 => {
                 self.library_state.move_down();
@@ -1124,26 +1038,34 @@ impl App {
         if self.pomodoro_visible {
             return;
         }
-        match self.active_tab {
-            0 => {
-                if self.home_focus_tabbar {
-                    // Already at tab bar; nothing to do.
+        if self.focus_tabbar {
+            // Already at tab bar; nothing to do.
+            return;
+        }
+        // Check if at top of content — if so, go back to tab bar.
+        let at_top = match self.active_tab {
+            0 => self.home_state.move_up(),
+            2 => {
+                if self.library_state.selected == 0 {
+                    true
                 } else {
-                    // move_up returns true if already at top — bubble up to tab bar.
-                    let at_top = self.home_state.move_up();
-                    if at_top {
-                        self.home_focus_tabbar = true;
-                    }
+                    self.library_state.move_up();
+                    self.update_library_scroll();
+                    false
                 }
             }
-            2 => {
-                self.library_state.move_up();
-                self.update_library_scroll();
-            }
             3 => {
-                self.settings_state.move_up();
+                if self.settings_state.selected == 0 {
+                    true
+                } else {
+                    self.settings_state.move_up();
+                    false
+                }
             }
-            _ => {}
+            _ => true,
+        };
+        if at_top {
+            self.focus_tabbar = true;
         }
     }
 
@@ -1177,7 +1099,7 @@ impl App {
 
         // Search popup: play selected result.
         if self.search_visible {
-            if let Some(path) = self.search_state.selected_track_path() {
+            if let Some(path) = self.search_state.selected_track_path_from(&self.library_state.library) {
                 self.player.enqueue_and_play(path);
                 self.search_visible = false;
                 self.active_tab = 1; // switch to Playing tab
@@ -1379,13 +1301,11 @@ impl App {
             if row == tab_rect.y && col >= tab_rect.x && col < tab_rect.x + tab_rect.width {
                 let mut x = tab_rect.x;
                 for (i, name) in TAB_NAMES.iter().enumerate() {
-                    let label_len = format!(" {name} ").len() as u16;
+                    let label_len = name.len() as u16 + 2;
                     if col >= x && col < x + label_len {
                         if i < TAB_COUNT {
                             self.active_tab = i;
-                            if i == 0 {
-                                self.home_focus_tabbar = false;
-                            }
+                            self.focus_tabbar = true;
                         }
                         return;
                     }
@@ -1456,12 +1376,21 @@ impl App {
 
         // Home tab click — select item in the clicked pane.
         if self.active_tab == 0 {
+            // Check keybindings hint click.
+            if let Some(hint_rect) = self.keybindings_hint_rect {
+                if row == hint_rect.y && col >= hint_rect.x && col < hint_rect.x + hint_rect.width {
+                    self.keybindings_visible = !self.keybindings_visible;
+                    return;
+                }
+            }
+
             if let Some(recent_rect) = self.home_state.recent_rect {
                 if row > recent_rect.y
                     && row < recent_rect.y + recent_rect.height
                     && col >= recent_rect.x
                     && col < recent_rect.x + recent_rect.width
                 {
+                    self.focus_tabbar = false;
                     self.home_state.pane = HomePane::RecentlyPlayed;
                     let clicked_idx = self.home_state.recent_scroll + (row - recent_rect.y - 1) as usize;
                     if clicked_idx < self.recent_tracks.len() {
@@ -1480,6 +1409,7 @@ impl App {
                     && col >= pl_rect.x
                     && col < pl_rect.x + pl_rect.width
                 {
+                    self.focus_tabbar = false;
                     self.home_state.pane = HomePane::Playlists;
                     let clicked_idx = self.home_state.playlist_scroll + (row - pl_rect.y - 1) as usize;
                     if clicked_idx < self.playlists_state.playlists.len() {
@@ -1497,7 +1427,7 @@ impl App {
         // Click on list items → select (and double-click-like: Enter behavior).
         if let Some(content_rect) = self.content_rect {
             let header_rows: u16 = match self.active_tab {
-                2 => 1,
+                2 => 2, // spacer + breadcrumb
                 3 => 1,
                 _ => return,
             };
@@ -1512,6 +1442,7 @@ impl App {
                     2 => {
                         let idx = self.library_state.scroll_offset + clicked_row;
                         if idx < self.library_state.item_count() {
+                            self.focus_tabbar = false;
                             if self.library_state.selected == idx {
                                 self.handle_enter();
                             } else {
@@ -1521,6 +1452,7 @@ impl App {
                     }
                     3 => {
                         if clicked_row < SettingsState::item_count() {
+                            self.focus_tabbar = false;
                             if self.settings_state.selected == clicked_row {
                                 self.settings_state.toggle(&mut self.settings);
                                 let _ = self.settings.save();
@@ -1639,14 +1571,108 @@ impl App {
         }
     }
 
+    /// Sync selection state from mouse hover position.
+    /// Moving the mouse over a list item selects it (same teal paint as keyboard).
+    fn handle_mouse_hover(&mut self, col: u16, row: u16) {
+        if self.search_visible || self.pomodoro_visible || self.keybindings_visible {
+            return;
+        }
+
+        // Check if hovering over tab bar.
+        if let Some(tab_rect) = self.tab_bar_rect {
+            if row == tab_rect.y && col >= tab_rect.x && col < tab_rect.x + tab_rect.width {
+                // Don't change focus_tabbar on hover — tabs are clicked, not hovered.
+                return;
+            }
+        }
+
+        match self.active_tab {
+            0 => {
+                // Home tab: check which pane the mouse is in.
+                if let Some(r) = self.home_state.recent_rect {
+                    let list_y = r.y + 1; // skip header
+                    if row >= list_y && row < r.y + r.height
+                        && col >= r.x && col < r.x + r.width
+                    {
+                        let idx = self.home_state.recent_scroll + (row - list_y) as usize;
+                        if idx < self.recent_tracks.len() {
+                            self.home_state.pane = HomePane::RecentlyPlayed;
+                            self.home_state.recent_selected = idx;
+                            self.focus_tabbar = false;
+                        }
+                        return;
+                    }
+                }
+                if let Some(r) = self.home_state.playlist_rect {
+                    let list_y = r.y + 1; // skip header
+                    if row >= list_y && row < r.y + r.height
+                        && col >= r.x && col < r.x + r.width
+                    {
+                        let idx = self.home_state.playlist_scroll + (row - list_y) as usize;
+                        if idx < self.playlists_state.playlists.len() {
+                            self.home_state.pane = HomePane::Playlists;
+                            self.home_state.playlist_selected = idx;
+                            self.focus_tabbar = false;
+                        }
+                        return;
+                    }
+                }
+            }
+            2 => {
+                // Library: map row to list index.
+                if let Some(content_rect) = self.content_rect {
+                    // Library layout: spacer(1) + breadcrumb(1) + list + hints(1)
+                    // The list starts at content_rect.y + 3 (spacer + breadcrumb + list area).
+                    // But the actual list area starts after the breadcrumb which is in chunks[2].
+                    // The list area starts at content_rect.y + 2 (spacer=1, breadcrumb=1).
+                    let list_start_y = content_rect.y + 2;
+                    if row >= list_start_y
+                        && row < content_rect.y + content_rect.height.saturating_sub(1) // -1 for hints
+                        && col >= content_rect.x
+                        && col < content_rect.x + content_rect.width
+                    {
+                        let clicked_row = (row - list_start_y) as usize;
+                        let idx = self.library_state.scroll_offset + clicked_row;
+                        if idx < self.library_state.item_count() {
+                            self.library_state.selected = idx;
+                            self.focus_tabbar = false;
+                        }
+                    }
+                }
+            }
+            3 => {
+                // Settings: map row to setting index.
+                if let Some(content_rect) = self.content_rect {
+                    let header_y = content_rect.y;
+                    if row > header_y
+                        && row < content_rect.y + content_rect.height
+                        && col >= content_rect.x
+                        && col < content_rect.x + content_rect.width
+                    {
+                        let clicked_row = (row - header_y - 1) as usize;
+                        if clicked_row < SettingsState::item_count() {
+                            self.settings_state.selected = clicked_row;
+                            self.focus_tabbar = false;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn update_library_scroll(&mut self) {
         let selected = self.library_state.selected;
         let offset = self.library_state.scroll_offset;
-        let visible = 20;
+        // Use actual content area height minus header row, fallback to 20.
+        let visible = self
+            .content_rect
+            .map(|r| r.height.saturating_sub(1) as usize)
+            .unwrap_or(20);
 
         if selected < offset {
             self.library_state.scroll_offset = selected;
-        } else if selected >= offset + visible {
+        } else if visible > 0 && selected >= offset + visible {
             self.library_state.scroll_offset = selected - visible + 1;
         }
     }
@@ -1851,12 +1877,7 @@ fn render_keybindings_popup(
     }
 }
 
-fn format_duration(d: Duration) -> String {
-    let total_secs = d.as_secs();
-    let mins = total_secs / 60;
-    let secs = total_secs % 60;
-    format!("{mins}:{secs:02}")
-}
+use crate::util::format::format_duration;
 
 /// Brighten a ratatui Color toward white by `factor` (0.0 = unchanged, 1.0 = white).
 fn brighten_color(color: Color, factor: f32) -> Color {

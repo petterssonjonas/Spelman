@@ -120,7 +120,11 @@ fn walk_dir(dir: &Path, tracks: &mut Vec<Track>, tx: &Sender<ScanEvent>) {
 fn is_audio_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|ext| AUDIO_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+        .map(|ext| {
+            AUDIO_EXTENSIONS
+                .iter()
+                .any(|&a| ext.eq_ignore_ascii_case(a))
+        })
         .unwrap_or(false)
 }
 

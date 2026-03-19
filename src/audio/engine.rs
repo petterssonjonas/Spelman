@@ -15,7 +15,7 @@ use crate::util::channels::{AudioCommand, AudioEvent};
 pub struct AudioEngine {
     cmd_tx: Sender<AudioCommand>,
     event_rx: Receiver<AudioEvent>,
-    _handle: thread::JoinHandle<()>,
+    handle: Option<thread::JoinHandle<()>>,
 }
 
 impl AudioEngine {
@@ -33,7 +33,7 @@ impl AudioEngine {
         Self {
             cmd_tx,
             event_rx,
-            _handle: handle,
+            handle: Some(handle),
         }
     }
 
@@ -43,6 +43,30 @@ impl AudioEngine {
 
     pub fn event_rx(&self) -> &Receiver<AudioEvent> {
         &self.event_rx
+    }
+
+    /// Shut down the audio engine, joining the background thread.
+    pub fn shutdown(&mut self) {
+        // Drop the sender so the engine thread's recv() returns Err and exits.
+        // We need to replace cmd_tx with a dummy to drop it.
+        let (_dummy_tx, _) = unbounded::<AudioCommand>();
+        let old_tx = std::mem::replace(&mut self.cmd_tx, _dummy_tx);
+        drop(old_tx);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for AudioEngine {
+    fn drop(&mut self) {
+        // If shutdown() wasn't called explicitly, join here.
+        if let Some(handle) = self.handle.take() {
+            // The cmd_tx is about to be dropped, which will unblock the engine thread.
+            // We can't join here because cmd_tx hasn't been dropped yet — the thread
+            // might be blocked on recv. Just let the thread detach naturally.
+            drop(handle);
+        }
     }
 }
 
@@ -255,8 +279,13 @@ fn drain_and_finish(
         ..
     } = state
     {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             if producer.slots() == producer.buffer().capacity() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!("drain_and_finish timed out after 5s");
                 break;
             }
             if let Ok(cmd) = cmd_rx.try_recv() {

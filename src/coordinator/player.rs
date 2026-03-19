@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -26,6 +28,8 @@ pub struct PlayerCoordinator {
     pub queue: Queue,
     pub album_art: AlbumArt,
     meta_rx: Option<crossbeam_channel::Receiver<TrackMeta>>,
+    /// Cancellation flag for the previous metadata loader thread.
+    meta_cancel: Arc<AtomicBool>,
 }
 
 impl PlayerCoordinator {
@@ -40,6 +44,7 @@ impl PlayerCoordinator {
             queue: Queue::new(),
             album_art: AlbumArt::default(),
             meta_rx: None,
+            meta_cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -137,8 +142,14 @@ impl PlayerCoordinator {
     }
 
     /// Stop playback.
-    pub fn stop(&self) {
+    pub fn stop(&mut self) {
         self.engine.send(AudioCommand::Stop);
+    }
+
+    /// Stop playback and shut down the engine thread cleanly.
+    pub fn shutdown(&mut self) {
+        self.engine.send(AudioCommand::Stop);
+        self.engine.shutdown();
     }
 
     /// Poll the engine for audio events and update state.
@@ -225,9 +236,15 @@ impl PlayerCoordinator {
     }
 
     /// Spawn a background thread to load metadata + album art.
+    /// Cancels any previously running metadata loader.
     fn load_metadata_async(&mut self, path: &std::path::Path) {
         use lofty::file::TaggedFileExt;
         use lofty::tag::Accessor;
+
+        // Cancel any previous loader thread.
+        self.meta_cancel.store(true, Ordering::Release);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.meta_cancel = cancel.clone();
 
         let path = path.to_path_buf();
         let (tx, rx) = crossbeam_channel::bounded(1);
@@ -236,6 +253,8 @@ impl PlayerCoordinator {
         thread::Builder::new()
             .name("meta-loader".into())
             .spawn(move || {
+                // Check cancellation before doing expensive I/O.
+                if cancel.load(Ordering::Acquire) { return; }
                 let mut meta = TrackMeta {
                     path: path.clone(),
                     title: String::new(),
@@ -244,6 +263,7 @@ impl PlayerCoordinator {
                     art_cells: None,
                 };
 
+                // Open the file once for both metadata and album art.
                 match lofty::probe::Probe::open(&path)
                     .and_then(|p| p.guess_file_type()?.read())
                 {
@@ -254,16 +274,26 @@ impl PlayerCoordinator {
                             meta.title = tag.title().map(|s| s.to_string()).unwrap_or_default();
                             meta.artist = tag.artist().map(|s| s.to_string()).unwrap_or_default();
                             meta.album = tag.album().map(|s| s.to_string()).unwrap_or_default();
+
+                            // Check cancellation before expensive image decode.
+                            if cancel.load(Ordering::Acquire) { return; }
+
+                            // Extract album art from the same tag.
+                            use lofty::picture::PictureType;
+                            let picture = tag
+                                .pictures()
+                                .iter()
+                                .find(|p| p.pic_type() == PictureType::CoverFront)
+                                .or_else(|| tag.pictures().first());
+                            if let Some(pic) = picture {
+                                if let Some(img) = albumart::load_image(pic.data()) {
+                                    meta.art_cells = Some(albumart::render_art(&img, 30, 15));
+                                }
+                            }
                         }
                     }
                     Err(e) => {
                         tracing::warn!("Could not read metadata: {e}");
-                    }
-                }
-
-                if let Some(data) = albumart::extract_cover(&path) {
-                    if let Some(img) = albumart::load_image(&data) {
-                        meta.art_cells = Some(albumart::render_art(&img, 30, 15));
                     }
                 }
 

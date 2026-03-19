@@ -61,18 +61,32 @@ impl PlaylistManager {
         playlists
     }
 
+    /// Deterministic filename for a playlist name.
+    ///
+    /// Sanitizes the name and appends a short hash to avoid collisions
+    /// between names that differ only in non-alphanumeric characters
+    /// (e.g. "My Playlist" vs "My:Playlist").
+    fn filename_for(name: &str) -> String {
+        let sanitized: String = name
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        // Simple FNV-1a hash of the original name for uniqueness.
+        let mut hash: u32 = 0x811c_9dc5;
+        for byte in name.bytes() {
+            hash ^= byte as u32;
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+        format!("{sanitized}_{hash:08x}")
+    }
+
     /// Save a playlist to disk.
     pub fn save(playlist: &Playlist) -> anyhow::Result<()> {
         let dir = Self::playlists_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?;
         std::fs::create_dir_all(&dir)?;
 
-        // Sanitize name for filename.
-        let filename: String = playlist
-            .name
-            .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-            .collect();
+        let filename = Self::filename_for(&playlist.name);
         let path = dir.join(format!("{filename}.toml"));
         let content = toml::to_string_pretty(playlist)?;
         std::fs::write(path, content)?;
@@ -84,10 +98,7 @@ impl PlaylistManager {
         let dir = Self::playlists_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?;
 
-        let filename: String = name
-            .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-            .collect();
+        let filename = Self::filename_for(name);
         let path = dir.join(format!("{filename}.toml"));
         if path.exists() {
             std::fs::remove_file(path)?;

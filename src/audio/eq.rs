@@ -36,7 +36,8 @@ const GAIN_MAX_DB: f32 = 12.0;
 const Q: f32 = 1.41;
 
 /// Maximum number of channels supported by the per-sample state arrays.
-const MAX_CHANNELS: usize = 2;
+/// Supports mono, stereo, and surround (up to 7.1).
+const MAX_CHANNELS: usize = 8;
 
 // ── BiquadFilter ──────────────────────────────────────────────────────────────
 
