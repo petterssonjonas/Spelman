@@ -12,6 +12,8 @@ pub struct Queue {
     shuffle_order: Vec<usize>,
     /// Current position in shuffle_order.
     shuffle_pos: usize,
+    /// History stack of previously played track indices (for prev() in shuffle mode).
+    shuffle_history: Vec<usize>,
 }
 
 impl Queue {
@@ -42,6 +44,7 @@ impl Queue {
         self.current = None;
         self.shuffle_order.clear();
         self.shuffle_pos = 0;
+        self.shuffle_history.clear();
     }
 
     /// Get the current track path.
@@ -76,8 +79,9 @@ impl Queue {
             return self.next_shuffled(repeat);
         }
 
-        // Sequential mode.
+        // Sequential mode — push current to history before advancing.
         if let Some(idx) = self.current {
+            self.shuffle_history.push(idx);
             if idx + 1 < self.tracks.len() {
                 self.current = Some(idx + 1);
                 return self.tracks.get(idx + 1);
@@ -93,6 +97,11 @@ impl Queue {
         // Build shuffle order if needed.
         if self.shuffle_order.len() != self.tracks.len() {
             self.rebuild_shuffle();
+        }
+
+        // Push current to history before advancing.
+        if let Some(idx) = self.current {
+            self.shuffle_history.push(idx);
         }
 
         self.shuffle_pos += 1;
@@ -117,7 +126,7 @@ impl Queue {
         let mut seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .subsec_nanos() as u64;
+            .as_nanos() as u64;
 
         for i in (1..self.shuffle_order.len()).rev() {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -137,8 +146,14 @@ impl Queue {
         None
     }
 
-    /// Go back to the previous track.
+    /// Go back to the previous track (uses history stack in shuffle mode).
     pub fn prev(&mut self) -> Option<&PathBuf> {
+        // Pop from history if available — works for both shuffle and sequential.
+        if let Some(prev_idx) = self.shuffle_history.pop() {
+            self.current = Some(prev_idx);
+            return self.tracks.get(prev_idx);
+        }
+        // Fallback: sequential prev.
         if let Some(idx) = self.current {
             if idx > 0 {
                 self.current = Some(idx - 1);
@@ -190,5 +205,39 @@ impl Queue {
     /// Whether the queue is empty.
     pub fn is_empty(&self) -> bool {
         self.tracks.is_empty()
+    }
+}
+
+/// Trait for anything that can provide the next/previous track to play.
+///
+/// `Queue` is the standard implementation, but future AI-generated or
+/// context-aware queue sources can implement this trait and plug into the
+/// player pipeline without changes to [`PlayerCoordinator`] or [`App`].
+pub trait QueueSource {
+    /// Advance to the next track and return its path, respecting shuffle and repeat.
+    fn next_track(&mut self, shuffle: ShuffleMode, repeat: RepeatMode) -> Option<PathBuf>;
+    /// Step back to the previous track and return its path.
+    fn prev_track(&mut self) -> Option<PathBuf>;
+    /// Return the currently active track path without advancing.
+    fn current_track(&self) -> Option<&PathBuf>;
+    /// Return `true` if there are no tracks to play.
+    fn is_empty(&self) -> bool;
+}
+
+impl QueueSource for Queue {
+    fn next_track(&mut self, shuffle: ShuffleMode, repeat: RepeatMode) -> Option<PathBuf> {
+        self.next_with_mode(shuffle, repeat).cloned()
+    }
+
+    fn prev_track(&mut self) -> Option<PathBuf> {
+        self.prev().cloned()
+    }
+
+    fn current_track(&self) -> Option<&PathBuf> {
+        Queue::current_track(self)
+    }
+
+    fn is_empty(&self) -> bool {
+        Queue::is_empty(self)
     }
 }

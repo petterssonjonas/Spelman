@@ -1,6 +1,6 @@
 # Spelman
 
-A nice GPU accelerated, AI enabled terminal music player written in Rust.
+An AI enabled terminal music player Vibe coded in Rust.
 
 Generate lofi music as you work, to match your mood. Tell it to make it a bit more mellow, or faster or make it jazz... 
 

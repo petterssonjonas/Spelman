@@ -12,9 +12,7 @@ pub struct PomodoroTab<'a> {
 
 impl<'a> Widget for PomodoroTab<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let inner = area;
-
-        if inner.height < 4 || inner.width < 20 {
+        if area.height < 4 || area.width < 20 {
             return;
         }
 
@@ -24,7 +22,7 @@ impl<'a> Widget for PomodoroTab<'a> {
                 Constraint::Length(5),
                 Constraint::Min(0),
             ])
-            .split(inner);
+            .split(area);
 
             let lines = vec![
                 Line::from(Span::styled(
@@ -60,7 +58,7 @@ impl<'a> Widget for PomodoroTab<'a> {
             Constraint::Length(1), // remaining time
             Constraint::Length(1), // status bar
         ])
-        .split(inner);
+        .split(area);
 
         // Phase label.
         let phase_color = match self.timer.phase {
@@ -69,10 +67,11 @@ impl<'a> Widget for PomodoroTab<'a> {
             PomodoroPhase::LongBreak => Color::Cyan,
         };
 
+        let slb = self.timer.sessions_before_long_break.max(1);
         let session_num = if self.timer.phase == PomodoroPhase::Work {
-            self.timer.sessions_completed % self.timer.sessions_before_long_break + 1
+            self.timer.sessions_completed % slb + 1
         } else {
-            self.timer.sessions_completed % self.timer.sessions_before_long_break
+            self.timer.sessions_completed % slb
         };
 
         let mut phase_spans = vec![
@@ -139,20 +138,24 @@ impl<'a> Widget for PomodoroTab<'a> {
     }
 }
 
-/// Render an analog clock face.
+/// Render an analog clock face with minute hand and progress arc.
 fn render_analog_clock(timer: &PomodoroTimer, area: Rect, buf: &mut Buffer) {
+    if area.height < 5 || area.width < 10 {
+        return;
+    }
+
     let cx = area.x + area.width / 2;
     let cy = area.y + area.height / 2;
     let radius = (area.height.min(area.width / 2)).saturating_sub(1).max(3);
 
     let fraction = timer.fraction();
     let is_break = timer.phase != PomodoroPhase::Work;
+    let active_color = if is_break { Color::Red } else { Color::Green };
 
-    // Draw clock face tick marks.
+    // Draw clock face — 12 hour markers and 60 minute dots.
     for step in 0..60 {
         let angle =
             (step as f64) * std::f64::consts::TAU / 60.0 - std::f64::consts::FRAC_PI_2;
-        // Use 2x horizontal scale to compensate for character aspect ratio.
         let x = (cx as f64 + (radius as f64 * 2.0) * angle.cos()).round() as u16;
         let y = (cy as f64 + (radius as f64) * angle.sin()).round() as u16;
 
@@ -160,10 +163,11 @@ fn render_analog_clock(timer: &PomodoroTimer, area: Rect, buf: &mut Buffer) {
             continue;
         }
 
-        let ch = if step % 5 == 0 { "●" } else { "·" };
+        let is_hour = step % 5 == 0;
+        let ch = if is_hour { "◆" } else { "·" };
         let step_frac = step as f64 / 60.0;
         let style = if step_frac <= fraction {
-            Style::default().fg(if is_break { Color::Red } else { Color::Green })
+            Style::default().fg(active_color)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -172,44 +176,61 @@ fn render_analog_clock(timer: &PomodoroTimer, area: Rect, buf: &mut Buffer) {
     }
 
     // Center dot.
-    buf.set_string(cx, cy, "◆", Style::default().fg(Color::Cyan));
+    buf.set_string(cx, cy, "●", Style::default().fg(Color::Cyan));
 
-    // Clock hand.
+    // Minute hand — points to the elapsed fraction.
     let hand_angle = fraction * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2;
-    let hand_style = if is_break {
-        Style::default()
-            .fg(Color::Red)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    };
-    for r in 1..radius.saturating_sub(1) {
+    let hand_len = radius.saturating_sub(2).max(1);
+    let hand_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    for r in 1..=hand_len {
         let hx = (cx as f64 + (r as f64 * 2.0) * hand_angle.cos()).round() as u16;
         let hy = (cy as f64 + (r as f64) * hand_angle.sin()).round() as u16;
         if hx >= area.x && hx < area.x + area.width && hy >= area.y && hy < area.y + area.height
         {
-            buf.set_string(hx, hy, "━", hand_style);
+            buf.set_string(hx, hy, "─", hand_style);
+        }
+    }
+
+    // Second hand — a short tick showing sub-fraction movement.
+    // Uses the fractional seconds part to create a ticking visual.
+    let remaining_secs = timer.remaining().as_secs_f64();
+    let sec_frac = (remaining_secs.fract()) * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2;
+    let sec_len = (hand_len / 2).max(1);
+    let sec_style = Style::default().fg(Color::Red);
+    for r in 1..=sec_len {
+        let sx = (cx as f64 + (r as f64 * 2.0) * sec_frac.cos()).round() as u16;
+        let sy = (cy as f64 + (r as f64) * sec_frac.sin()).round() as u16;
+        if sx >= area.x && sx < area.x + area.width && sy >= area.y && sy < area.y + area.height
+        {
+            buf.set_string(sx, sy, "·", sec_style);
         }
     }
 }
 
 /// Render an hourglass / sand timer.
 fn render_hourglass(timer: &PomodoroTimer, area: Rect, buf: &mut Buffer) {
+    if area.height < 5 || area.width < 16 {
+        // Fall back to simple progress text if too small.
+        let pct = (timer.fraction() * 100.0) as u8;
+        let text = format!("[{}%] {}", pct, timer.remaining_display());
+        let x = area.x + area.width.saturating_sub(text.len() as u16) / 2;
+        let y = area.y + area.height / 2;
+        buf.set_string(x, y, &text, Style::default().fg(Color::Yellow));
+        return;
+    }
+
     let fraction = timer.fraction();
     let is_break = timer.phase != PomodoroPhase::Work;
     let sand_color = if is_break { Color::Red } else { Color::Yellow };
     let glass_color = Color::DarkGray;
 
-    let max_h = area.height.min(14) as usize;
-    if max_h < 5 {
-        return;
-    }
+    let max_h = area.height.min(12) as usize;
     let half = max_h / 2;
     let cx = area.x + area.width / 2;
-    let top_fill = ((1.0 - fraction) * half as f64).round() as usize;
-    let bottom_fill = (fraction * half as f64).round() as usize;
+    let top_fill = ((1.0 - fraction) * (half.saturating_sub(1)) as f64).round() as usize;
+    let bottom_fill = (fraction * (half.saturating_sub(1)) as f64).round() as usize;
 
     for row in 0..max_h {
         let y = area.y + (area.height.saturating_sub(max_h as u16)) / 2 + row as u16;
@@ -217,25 +238,21 @@ fn render_hourglass(timer: &PomodoroTimer, area: Rect, buf: &mut Buffer) {
             break;
         }
 
+        let start = cx.saturating_sub(7);
+
         if row == 0 || row == max_h - 1 {
-            // Top/bottom border.
-            let start = cx.saturating_sub(7);
-            buf.set_string(start, y, "╔════════════╗", Style::default().fg(glass_color));
+            buf.set_string(start, y, "+-----------+", Style::default().fg(glass_color));
         } else if row == half {
-            // Neck.
-            let start = cx.saturating_sub(2);
-            buf.set_string(start, y, "╳╳╳╳╳", Style::default().fg(glass_color));
+            buf.set_string(start, y, "     >.<     ", Style::default().fg(glass_color));
         } else if row < half {
-            // Upper chamber — sand drains out.
-            let width = (10_usize).saturating_sub(row * 2).max(2);
-            let pad = (12 - width) / 2;
+            let chamber_width = 9_usize.saturating_sub((row.saturating_sub(1)) * 2).max(1);
+            let pad = (9 - chamber_width) / 2;
             let is_filled = row <= top_fill;
-            let fill_ch = if is_filled { "░" } else { " " };
-            let fill: String = fill_ch.repeat(width);
-            let lp = " ".repeat(pad);
-            let rp = " ".repeat(12usize.saturating_sub(pad + width));
-            let start = cx.saturating_sub(7);
-            let content = format!("║{lp}{fill}{rp}║");
+            let fill_ch = if is_filled { ":" } else { " " };
+            let fill: String = fill_ch.repeat(chamber_width);
+            let lp = " ".repeat(pad + 1);
+            let rp = " ".repeat(9usize.saturating_sub(pad + chamber_width) + 1);
+            let content = format!("|{lp}{fill}{rp}|");
             let style = if is_filled {
                 Style::default().fg(sand_color)
             } else {
@@ -243,17 +260,15 @@ fn render_hourglass(timer: &PomodoroTimer, area: Rect, buf: &mut Buffer) {
             };
             buf.set_string(start, y, &content, style);
         } else {
-            // Lower chamber — sand fills up.
             let dist_from_bottom = max_h - 1 - row;
-            let width = (10_usize).saturating_sub(dist_from_bottom * 2).max(2);
-            let pad = (12 - width) / 2;
+            let chamber_width = 9_usize.saturating_sub((dist_from_bottom.saturating_sub(1)) * 2).max(1);
+            let pad = (9 - chamber_width) / 2;
             let is_filled = dist_from_bottom < bottom_fill;
-            let fill_ch = if is_filled { "▓" } else { " " };
-            let fill: String = fill_ch.repeat(width);
-            let lp = " ".repeat(pad);
-            let rp = " ".repeat(12usize.saturating_sub(pad + width));
-            let start = cx.saturating_sub(7);
-            let content = format!("║{lp}{fill}{rp}║");
+            let fill_ch = if is_filled { ":" } else { " " };
+            let fill: String = fill_ch.repeat(chamber_width);
+            let lp = " ".repeat(pad + 1);
+            let rp = " ".repeat(9usize.saturating_sub(pad + chamber_width) + 1);
+            let content = format!("|{lp}{fill}{rp}|");
             let style = if is_filled {
                 Style::default().fg(sand_color)
             } else {
@@ -266,6 +281,16 @@ fn render_hourglass(timer: &PomodoroTimer, area: Rect, buf: &mut Buffer) {
 
 /// Render a large digital countdown.
 fn render_digital_timer(timer: &PomodoroTimer, area: Rect, buf: &mut Buffer) {
+    if area.height < 5 || area.width < 20 {
+        // Fallback: simple centered text.
+        let text = timer.remaining_display();
+        let x = area.x + area.width.saturating_sub(text.len() as u16) / 2;
+        let y = area.y + area.height / 2;
+        let color = if timer.phase != PomodoroPhase::Work { Color::Yellow } else { Color::Green };
+        buf.set_string(x, y, &text, Style::default().fg(color).add_modifier(Modifier::BOLD));
+        return;
+    }
+
     let remaining = timer.remaining();
     let mins = remaining.as_secs() / 60;
     let secs = remaining.as_secs() % 60;
@@ -302,27 +327,28 @@ fn render_digital_timer(timer: &PomodoroTimer, area: Rect, buf: &mut Buffer) {
         let bar_width = area.width.min(40) as usize;
         let filled = (timer.fraction() * bar_width as f64) as usize;
         let bar: String =
-            "█".repeat(filled) + &"░".repeat(bar_width.saturating_sub(filled));
+            "#".repeat(filled) + &"-".repeat(bar_width.saturating_sub(filled));
         let x = area.x + (area.width.saturating_sub(bar_width as u16)) / 2;
-        buf.set_string(x, bar_y, &bar, Style::default().fg(color));
+        buf.set_string(x, bar_y, &format!("[{bar}]"), Style::default().fg(color));
     }
 }
 
-/// Render digits in 5-line tall block font.
+/// Render digits in 5-line tall font using only basic ASCII.
+/// Each digit is 4 chars wide (3 content + 1 space).
 fn render_big_digits(s: &str) -> Vec<String> {
     #[rustfmt::skip]
     const D: [[&str; 5]; 11] = [
-        ["█▀▀█", "█  █", "█  █", "█  █", "█▄▄█"], // 0
-        ["  ▀█", "   █", "   █", "   █", "   █"], // 1
-        ["█▀▀█", "   █", "█▀▀▀", "█   ", "█▄▄█"], // 2
-        ["█▀▀█", "   █", " ▀▀█", "   █", "█▄▄█"], // 3
-        ["█  █", "█  █", "▀▀▀█", "   █", "   █"], // 4
-        ["█▀▀█", "█   ", "█▀▀█", "   █", "█▄▄█"], // 5
-        ["█▀▀█", "█   ", "█▀▀█", "█  █", "█▄▄█"], // 6
-        ["█▀▀█", "   █", "   █", "   █", "   █"], // 7
-        ["█▀▀█", "█  █", "█▀▀█", "█  █", "█▄▄█"], // 8
-        ["█▀▀█", "█  █", "▀▀▀█", "   █", "█▄▄█"], // 9
-        ["    ", " ██ ", "    ", " ██ ", "    "], // :
+        ["###", "# #", "# #", "# #", "###"], // 0
+        ["  #", "  #", "  #", "  #", "  #"], // 1
+        ["###", "  #", "###", "#  ", "###"], // 2
+        ["###", "  #", "###", "  #", "###"], // 3
+        ["# #", "# #", "###", "  #", "  #"], // 4
+        ["###", "#  ", "###", "  #", "###"], // 5
+        ["###", "#  ", "###", "# #", "###"], // 6
+        ["###", "  #", "  #", "  #", "  #"], // 7
+        ["###", "# #", "###", "# #", "###"], // 8
+        ["###", "# #", "###", "  #", "###"], // 9
+        [" ", ":", " ", ":", " "],            // :
     ];
 
     let mut lines = vec![String::new(); 5];

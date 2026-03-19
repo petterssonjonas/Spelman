@@ -11,6 +11,17 @@ use crate::ui::albumart::AlbumArt;
 use crate::ui::widgets::progress_bar::ProgressBar;
 use crate::ui::widgets::visualizer::Visualizer;
 
+/// Playback state — replaces ambiguous `is_playing: bool` + `file_path: Option`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlaybackState {
+    /// No track loaded or playback finished.
+    Stopped,
+    /// Actively playing audio.
+    Playing,
+    /// Playback paused — can resume.
+    Paused,
+}
+
 /// State for the Now Playing tab.
 #[derive(Debug, Clone)]
 pub struct PlayingState {
@@ -20,7 +31,7 @@ pub struct PlayingState {
     pub file_path: Option<PathBuf>,
     pub elapsed: Duration,
     pub duration: Duration,
-    pub is_playing: bool,
+    pub playback: PlaybackState,
     pub volume: f32,
     pub sample_rate: u32,
     pub channels: u16,
@@ -38,7 +49,7 @@ impl Default for PlayingState {
             file_path: None,
             elapsed: Duration::ZERO,
             duration: Duration::ZERO,
-            is_playing: false,
+            playback: PlaybackState::Stopped,
             volume: 0.5,
             sample_rate: 0,
             channels: 0,
@@ -70,59 +81,89 @@ pub struct PlayingTab<'a> {
 
 impl<'a> Widget for PlayingTab<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let inner = area;
-
-        if inner.height < 4 || inner.width < 20 {
+        if area.height < 4 || area.width < 20 {
             return;
         }
 
-        // If we have album art, split into left (art) and right (info).
-        let (art_area, info_area) = if self.album_art.has_art && inner.width > 50 {
-            let cols = Layout::horizontal([
-                Constraint::Length(32), // art
-                Constraint::Min(0),    // info
-            ])
-            .split(inner);
-            (Some(cols[0]), cols[1])
+        // Empty state: show simple message.
+        if self.state.file_path.is_none() && self.queue.is_empty() {
+            Paragraph::new(Line::from(Span::styled(
+                "No track loaded — select from Home tab or Library",
+                Style::default().fg(Color::DarkGray),
+            )))
+            .centered()
+            .render(area, buf);
+            return;
+        }
+
+        // Compute album art display size.
+        // Fixed items below art: title(1) + artist(1) + album(1) + controls(1) + seek(1)
+        // + spacer(1) + min visualizer(4) + spacer(1) = 11 rows minimum.
+        let art_source_rows = self.album_art.cells.len();
+        let art_source_cols = self.album_art.cells.first().map_or(0, |r| r.len());
+        let max_art_rows = area.height.saturating_sub(11) as usize; // leave room for everything else
+        let art_rows = if self.album_art.has_art && max_art_rows >= 4 && art_source_rows > 0 {
+            art_source_rows.min(max_art_rows).min(18) as u16 // cap at 18 rows max
         } else {
-            (None, inner)
+            0
         };
 
-        // Render ASCII album art if available.
-        if let Some(art_rect) = art_area {
-            for (i, line) in self.album_art.ascii_lines.iter().enumerate() {
-                let y = art_rect.y + i as u16;
-                if y >= art_rect.y + art_rect.height {
+        // Layout top-to-bottom:
+        //   album art | track info (3 lines) | controls (1) | seek bar (1) | spacer | visualizer | spacer | queue
+        let chunks = Layout::vertical([
+            Constraint::Length(art_rows),  // album art
+            Constraint::Length(1),         // title
+            Constraint::Length(1),         // artist
+            Constraint::Length(1),         // album
+            Constraint::Length(1),         // controls: play/pause + volume + format
+            Constraint::Length(1),         // seek / progress bar
+            Constraint::Length(1),         // spacer
+            Constraint::Min(4),           // visualizer (fills remaining, capped below)
+            Constraint::Length(1),         // spacer
+            Constraint::Min(0),           // queue
+        ])
+        .split(area);
+
+        // --- Album art (top, centered, scaled to fit) ---
+        if art_rows > 0 {
+            let display_rows = art_rows as usize;
+            // Scale the art width proportionally to the height.
+            let scale = display_rows as f32 / art_source_rows as f32;
+            let display_cols = ((art_source_cols as f32) * scale).round() as usize;
+            let display_cols = display_cols.min(chunks[0].width as usize);
+
+            let art_x = chunks[0].x + (chunks[0].width.saturating_sub(display_cols as u16)) / 2;
+
+            for row_idx in 0..display_rows {
+                let y = chunks[0].y + row_idx as u16;
+                if y >= chunks[0].y + chunks[0].height {
                     break;
                 }
-                let display: String = line
-                    .chars()
-                    .filter(|c| !c.is_control() || *c == '\u{2580}')
-                    .take(art_rect.width as usize)
-                    .collect();
-                buf.set_string(
-                    art_rect.x,
-                    y,
-                    &display,
-                    Style::default().fg(Color::DarkGray),
-                );
+                // Map display row back to source row.
+                let src_row = (row_idx as f32 / scale).round() as usize;
+                let src_row = src_row.min(art_source_rows.saturating_sub(1));
+                let src = &self.album_art.cells[src_row];
+
+                for col_idx in 0..display_cols {
+                    let x = art_x + col_idx as u16;
+                    if x >= chunks[0].x + chunks[0].width {
+                        break;
+                    }
+                    // Map display col back to source col.
+                    let src_col = (col_idx as f32 / scale).round() as usize;
+                    let src_col = src_col.min(art_source_cols.saturating_sub(1));
+                    let cell = &src[src_col];
+                    buf.set_string(
+                        x,
+                        y,
+                        "\u{2580}",
+                        Style::default().fg(cell.fg).bg(cell.bg),
+                    );
+                }
             }
         }
 
-        let chunks = Layout::vertical([
-            Constraint::Length(1), // title
-            Constraint::Length(1), // artist
-            Constraint::Length(1), // album
-            Constraint::Length(1), // status + format info
-            Constraint::Length(1), // progress bar
-            Constraint::Length(1), // spacer
-            Constraint::Min(4),   // visualizer
-            Constraint::Length(1), // spacer
-            Constraint::Min(0),   // queue
-        ])
-        .split(info_area);
-
-        // Title.
+        // --- Title ---
         let title = if self.state.title.is_empty() {
             self.state
                 .file_path
@@ -135,44 +176,41 @@ impl<'a> Widget for PlayingTab<'a> {
         } else {
             self.state.title.clone()
         };
-        Paragraph::new(Line::from(vec![Span::styled(
+        Paragraph::new(Line::from(Span::styled(
             title,
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
-        )]))
+        )))
         .centered()
-        .render(chunks[0], buf);
+        .render(chunks[1], buf);
 
-        // Artist.
+        // --- Artist ---
         if !self.state.artist.is_empty() {
-            Paragraph::new(Line::from(vec![Span::styled(
+            Paragraph::new(Line::from(Span::styled(
                 &self.state.artist,
                 Style::default().fg(Color::Yellow),
-            )]))
-            .centered()
-            .render(chunks[1], buf);
-        }
-
-        // Album.
-        if !self.state.album.is_empty() {
-            Paragraph::new(Line::from(vec![Span::styled(
-                &self.state.album,
-                Style::default().fg(Color::DarkGray),
-            )]))
+            )))
             .centered()
             .render(chunks[2], buf);
         }
 
-        // Status + volume/format info combined.
-        let status_icon = if self.state.is_playing {
-            "▶ Playing"
-        } else if self.state.file_path.is_some() {
-            "⏸ Paused"
-        } else {
-            "⏹ Stopped"
-        };
+        // --- Album ---
+        if !self.state.album.is_empty() {
+            Paragraph::new(Line::from(Span::styled(
+                &self.state.album,
+                Style::default().fg(Color::DarkGray),
+            )))
+            .centered()
+            .render(chunks[3], buf);
+        }
 
+        // --- Controls: play/pause + volume + format info ---
+        let status_icon = match self.state.playback {
+            PlaybackState::Playing => "▶ Playing",
+            PlaybackState::Paused => "⏸ Paused",
+            PlaybackState::Stopped => "⏹ Stopped",
+        };
         let vol_pct = (self.state.volume * 100.0) as u8;
         let format_info = if self.state.sample_rate > 0 {
             format!(
@@ -182,36 +220,39 @@ impl<'a> Widget for PlayingTab<'a> {
         } else {
             format!("│  Vol: {}%", vol_pct)
         };
-
-        let status_line = Line::from(vec![
+        Paragraph::new(Line::from(vec![
             Span::styled(status_icon, Style::default().fg(Color::Green)),
             Span::styled(format!("  {format_info}"), Style::default().fg(Color::DarkGray)),
-        ]);
-        Paragraph::new(status_line)
-            .centered()
-            .render(chunks[3], buf);
+        ]))
+        .centered()
+        .render(chunks[4], buf);
 
-        // Progress bar.
+        // --- Seek / progress bar ---
         ProgressBar::default()
             .elapsed(self.state.elapsed)
             .total(self.state.duration)
-            .render(chunks[4], buf);
+            .render(chunks[5], buf);
 
-        // Spectrum visualizer.
+        // --- Spectrum visualizer (capped at 50 rows) ---
         if !self.state.spectrum.is_empty() {
+            let viz_area = chunks[7];
+            let capped = Rect {
+                height: viz_area.height.min(50),
+                ..viz_area
+            };
             Visualizer {
                 spectrum: &self.state.spectrum,
             }
-            .render(chunks[6], buf);
+            .render(capped, buf);
         }
 
-        // Queue display.
-        if !self.queue.is_empty() && chunks[8].height >= 2 {
-            let queue_area = chunks[8];
-            let queue_header = Line::from(vec![Span::styled(
+        // --- Queue display ---
+        if !self.queue.is_empty() && chunks[9].height >= 2 {
+            let queue_area = chunks[9];
+            let queue_header = Line::from(Span::styled(
                 format!(" Queue ({} tracks) ", self.queue.len()),
                 Style::default().fg(Color::DarkGray),
-            )]);
+            ));
             buf.set_line(queue_area.x, queue_area.y, &queue_header, queue_area.width);
 
             let current_idx = self.queue.current_index();
@@ -254,3 +295,4 @@ impl<'a> Widget for PlayingTab<'a> {
         }
     }
 }
+

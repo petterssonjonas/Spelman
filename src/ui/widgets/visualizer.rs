@@ -21,7 +21,7 @@ impl<'a> Widget for Visualizer<'a> {
         let num_bars = self.spectrum.len();
         let max_height = area.height as f32;
 
-        // Calculate bar width and gap to fill the area.
+        // Fill the entire width — no gaps between pillars.
         let total_width = area.width as usize;
         let bar_width = (total_width / num_bars).max(1);
         let total_bar_space = bar_width * num_bars;
@@ -42,17 +42,19 @@ impl<'a> Widget for Visualizer<'a> {
                 let cell_from_bottom = row;
 
                 let (ch, color) = if cell_from_bottom < full_cells {
-                    // Full cell.
-                    (BARS[8], bar_color(cell_from_bottom, area.height))
+                    // Full cell — shade by how high up the bar this cell is.
+                    let intensity = 1.0 - (cell_from_bottom as f32 / full_cells.max(1) as f32);
+                    (BARS[8], shade_color(intensity))
                 } else if cell_from_bottom == full_cells && frac > 0 {
-                    // Partial top cell.
-                    (BARS[frac], bar_color(cell_from_bottom, area.height))
+                    // Partial top cell — dimmest.
+                    (BARS[frac], shade_color(0.0))
                 } else {
                     continue;
                 };
 
                 let style = Style::default().fg(color);
-                for bw in 0..bar_width.saturating_sub(if bar_width > 1 { 1 } else { 0 }) {
+                // Fill entire bar_width — no gap subtracted.
+                for bw in 0..bar_width {
                     let x = x_start + bw as u16;
                     if x < area.x + area.width {
                         buf.set_string(x, y, ch, style);
@@ -63,19 +65,14 @@ impl<'a> Widget for Visualizer<'a> {
     }
 }
 
-/// Color gradient from bottom (cyan) to top (magenta) like CAVA.
-fn bar_color(row: u16, total: u16) -> Color {
-    if total <= 1 {
-        return Color::Cyan;
-    }
-    let frac = row as f32 / (total - 1) as f32;
-    if frac < 0.33 {
-        Color::Cyan
-    } else if frac < 0.55 {
-        Color::Green
-    } else if frac < 0.75 {
-        Color::Yellow
-    } else {
-        Color::Red
-    }
+/// Shade a pillar cell based on intensity (1.0 = bottom/brightest, 0.0 = top/dimmest).
+///
+/// Uses RGB for a smooth cyan-to-dark gradient:
+///   bottom → bright cyan, top → dark blue-gray.
+fn shade_color(intensity: f32) -> Color {
+    // Bright cyan at bottom, fading toward dark teal at top.
+    let r = (20.0 + 30.0 * (1.0 - intensity)) as u8;
+    let g = (60.0 + 195.0 * intensity) as u8;
+    let b = (80.0 + 175.0 * intensity) as u8;
+    Color::Rgb(r, g, b)
 }

@@ -5,14 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, Paragraph, Widget};
 use std::path::PathBuf;
 
-use crate::config::settings::{RepeatMode, Settings, ShuffleMode};
-
-/// A setting item for display.
-#[derive(Debug, Clone)]
-struct SettingItem {
-    label: String,
-    value: String,
-}
+use crate::config::settings::{BindableAction, RepeatMode, Settings, ShuffleMode};
 
 /// State for the Settings tab.
 #[derive(Debug, Clone)]
@@ -21,6 +14,10 @@ pub struct SettingsState {
     pub editing: bool,
     pub edit_buffer: String,
     pub status_message: Option<String>,
+    /// Waiting for user to press a key for rebinding.
+    pub rebinding: bool,
+    /// Which action is being rebound.
+    pub rebind_action: Option<BindableAction>,
 }
 
 impl Default for SettingsState {
@@ -30,19 +27,26 @@ impl Default for SettingsState {
             editing: false,
             edit_buffer: String::new(),
             status_message: None,
+            rebinding: false,
+            rebind_action: None,
         }
     }
 }
 
+/// Number of non-keybinding settings items.
+const BASE_ITEM_COUNT: usize = 6;
+/// Separator row between settings and keybindings.
+const SEPARATOR_COUNT: usize = 1;
+
 impl SettingsState {
     pub fn move_up(&mut self) {
-        if !self.editing && self.selected > 0 {
+        if !self.editing && !self.rebinding && self.selected > 0 {
             self.selected -= 1;
         }
     }
 
     pub fn move_down(&mut self, max: usize) {
-        if !self.editing && self.selected + 1 < max {
+        if !self.editing && !self.rebinding && self.selected + 1 < max {
             self.selected += 1;
         }
     }
@@ -50,57 +54,63 @@ impl SettingsState {
     /// Toggle or start editing the selected setting.
     pub fn toggle(&mut self, settings: &mut Settings) {
         if self.editing {
-            // Save the edit.
             self.apply_edit(settings);
             return;
         }
 
-        match self.selected {
-            0 => {
-                // Music directory: enter edit mode.
-                self.editing = true;
-                self.edit_buffer = settings
-                    .music_directory
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default();
+        if self.selected < BASE_ITEM_COUNT {
+            // Regular settings.
+            match self.selected {
+                0 => {
+                    self.editing = true;
+                    self.edit_buffer = settings
+                        .music_directory
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                }
+                1 => {
+                    self.editing = true;
+                    self.edit_buffer = format!("{}", (settings.default_volume * 100.0).round() as u32);
+                }
+                2 => {
+                    self.editing = true;
+                    self.edit_buffer = format!("{}", settings.seek_step_secs);
+                }
+                3 => {
+                    settings.repeat_mode = match settings.repeat_mode {
+                        RepeatMode::Off => RepeatMode::All,
+                        RepeatMode::All => RepeatMode::One,
+                        RepeatMode::One => RepeatMode::Off,
+                    };
+                }
+                4 => {
+                    settings.shuffle = match settings.shuffle {
+                        ShuffleMode::Off => ShuffleMode::On,
+                        ShuffleMode::On => ShuffleMode::Off,
+                    };
+                }
+                5 => {
+                    settings.theme = match settings.theme.as_str() {
+                        "default" => "catppuccin".into(),
+                        "catppuccin" => "gruvbox".into(),
+                        "gruvbox" => "default".into(),
+                        _ => "default".into(),
+                    };
+                }
+                _ => {}
             }
-            1 => {
-                // Volume: enter edit mode.
-                self.editing = true;
-                self.edit_buffer = format!("{}", (settings.default_volume * 100.0).round() as u32);
+        } else {
+            // Keybinding row: start rebinding.
+            let kb_index = self.selected - BASE_ITEM_COUNT - SEPARATOR_COUNT;
+            if let Some(&action) = BindableAction::ALL.get(kb_index) {
+                self.rebinding = true;
+                self.rebind_action = Some(action);
+                self.status_message = Some(format!("Press a key for '{}'...", action.label()));
             }
-            2 => {
-                // Seek step: enter edit mode.
-                self.editing = true;
-                self.edit_buffer = format!("{}", settings.seek_step_secs);
-            }
-            3 => {
-                settings.repeat_mode = match settings.repeat_mode {
-                    RepeatMode::Off => RepeatMode::All,
-                    RepeatMode::All => RepeatMode::One,
-                    RepeatMode::One => RepeatMode::Off,
-                };
-            }
-            4 => {
-                settings.shuffle = match settings.shuffle {
-                    ShuffleMode::Off => ShuffleMode::On,
-                    ShuffleMode::On => ShuffleMode::Off,
-                };
-            }
-            5 => {
-                settings.theme = match settings.theme.as_str() {
-                    "default" => "catppuccin".into(),
-                    "catppuccin" => "gruvbox".into(),
-                    "gruvbox" => "default".into(),
-                    _ => "default".into(),
-                };
-            }
-            _ => {}
         }
     }
 
-    /// Apply the current edit buffer to the corresponding setting.
     fn apply_edit(&mut self, settings: &mut Settings) {
         self.editing = false;
         match self.selected {
@@ -143,74 +153,31 @@ impl SettingsState {
         self.edit_buffer.clear();
     }
 
-    /// Cancel editing without applying.
     pub fn cancel_edit(&mut self) {
         self.editing = false;
+        self.rebinding = false;
+        self.rebind_action = None;
         self.edit_buffer.clear();
     }
 
-    /// Push a character to the edit buffer (when editing).
     pub fn edit_push(&mut self, ch: char) {
         if self.editing {
             self.edit_buffer.push(ch);
         }
     }
 
-    /// Remove last character from the edit buffer.
     pub fn edit_pop(&mut self) {
         if self.editing {
             self.edit_buffer.pop();
         }
     }
 
-    fn setting_items(settings: &Settings) -> Vec<SettingItem> {
-        vec![
-            SettingItem {
-                label: "Music Directory".into(),
-                value: settings
-                    .music_directory
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "(not set)".into()),
-            },
-            SettingItem {
-                label: "Default Volume".into(),
-                value: format!("{}%", (settings.default_volume * 100.0) as u8),
-            },
-            SettingItem {
-                label: "Seek Step".into(),
-                value: format!("{}s", settings.seek_step_secs),
-            },
-            SettingItem {
-                label: "Repeat".into(),
-                value: match settings.repeat_mode {
-                    RepeatMode::Off => "Off",
-                    RepeatMode::All => "All",
-                    RepeatMode::One => "One",
-                }
-                .into(),
-            },
-            SettingItem {
-                label: "Shuffle".into(),
-                value: match settings.shuffle {
-                    ShuffleMode::Off => "Off",
-                    ShuffleMode::On => "On",
-                }
-                .into(),
-            },
-            SettingItem {
-                label: "Theme".into(),
-                value: settings.theme.clone(),
-            },
-        ]
-    }
-
+    /// Total number of rows in the settings list (settings + separator + keybindings).
     pub fn item_count() -> usize {
-        6
+        BASE_ITEM_COUNT + SEPARATOR_COUNT + BindableAction::ALL.len()
     }
 }
 
-/// Get the user's home directory.
 fn dirs_home() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
 }
@@ -222,20 +189,16 @@ pub struct SettingsTab<'a> {
 
 impl<'a> Widget for SettingsTab<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let inner = area;
-
-        if inner.height < 4 || inner.width < 20 {
+        if area.height < 4 || area.width < 20 {
             return;
         }
-
-        let items = SettingsState::setting_items(self.settings);
 
         let chunks = Layout::vertical([
             Constraint::Length(1), // header
             Constraint::Min(0),   // list
             Constraint::Length(1), // status / help
         ])
-        .split(inner);
+        .split(area);
 
         // Header.
         Paragraph::new(Line::from(vec![
@@ -244,65 +207,95 @@ impl<'a> Widget for SettingsTab<'a> {
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  (Enter to toggle/edit, s to save)",
+                "  (Enter to toggle/edit, auto-saved)",
                 Style::default().fg(Color::DarkGray),
             ),
         ]))
         .render(chunks[0], buf);
 
-        // Settings list.
-        let list_items: Vec<ListItem> = items
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
-                let is_selected = i == self.state.selected;
-                let is_editing = is_selected && self.state.editing;
+        // Build all rows.
+        let mut list_items: Vec<ListItem> = Vec::new();
 
-                let label_style = if is_selected {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-                } else {
-                    Style::default().fg(Color::White)
-                };
+        // Base settings.
+        let base_items = base_setting_items(self.settings);
+        for (i, item) in base_items.iter().enumerate() {
+            let is_selected = i == self.state.selected;
+            let is_editing = is_selected && self.state.editing;
+            list_items.push(render_setting_row(
+                &item.0, &item.1, is_selected, is_editing,
+                &self.state.edit_buffer,
+            ));
+        }
 
-                let prefix = if is_selected { " > " } else { "   " };
+        // Separator.
+        let sep_selected = self.state.selected == BASE_ITEM_COUNT;
+        let sep_style = if sep_selected {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        list_items.push(ListItem::new(Line::from(Span::styled(
+            "   ── Keybindings ──────────────────────────",
+            sep_style,
+        ))));
 
-                if is_editing {
-                    let cursor = "_";
-                    ListItem::new(Line::from(vec![
-                        Span::styled(format!("{prefix}{:<20}", item.label), label_style),
-                        Span::styled(
-                            &self.state.edit_buffer,
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            cursor,
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::SLOW_BLINK),
-                        ),
-                    ]))
-                } else {
-                    let value_style = if is_selected {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(format!("{prefix}{:<20}", item.label), label_style),
-                        Span::styled(&item.value, value_style),
-                    ]))
-                }
-            })
+        // Keybinding rows.
+        for (i, &action) in BindableAction::ALL.iter().enumerate() {
+            let row_idx = BASE_ITEM_COUNT + SEPARATOR_COUNT + i;
+            let is_selected = row_idx == self.state.selected;
+            let is_rebinding = is_selected && self.state.rebinding;
+
+            let keys = self.settings.keybindings.keys_for(action);
+            let keys_display = if is_rebinding {
+                "Press a key...".to_string()
+            } else if keys.is_empty() {
+                "(unbound)".to_string()
+            } else {
+                keys.join(", ")
+            };
+
+            let label_style = if is_selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let value_style = if is_rebinding {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::SLOW_BLINK)
+            } else if is_selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            let prefix = if is_selected { " > " } else { "   " };
+            list_items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!("{prefix}{:<24}", action.label()), label_style),
+                Span::styled(keys_display, value_style),
+            ])));
+        }
+
+        // Apply scroll — keep selected item visible.
+        let visible_height = chunks[1].height as usize;
+        let scroll = if self.state.selected >= visible_height {
+            self.state.selected - visible_height + 1
+        } else {
+            0
+        };
+
+        let visible_items: Vec<ListItem> = list_items
+            .into_iter()
+            .skip(scroll)
+            .take(visible_height)
             .collect();
 
-        let list = List::new(list_items);
-        list.render(chunks[1], buf);
+        List::new(visible_items).render(chunks[1], buf);
 
         // Status message.
         if let Some(ref msg) = self.state.status_message {
@@ -312,5 +305,92 @@ impl<'a> Widget for SettingsTab<'a> {
             )))
             .render(chunks[2], buf);
         }
+    }
+}
+
+fn base_setting_items(settings: &Settings) -> Vec<(String, String)> {
+    vec![
+        (
+            "Music Directory".into(),
+            settings
+                .music_directory
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(not set)".into()),
+        ),
+        (
+            "Default Volume".into(),
+            format!("{}%", (settings.default_volume * 100.0) as u8),
+        ),
+        (
+            "Seek Step".into(),
+            format!("{}s", settings.seek_step_secs),
+        ),
+        (
+            "Repeat".into(),
+            match settings.repeat_mode {
+                RepeatMode::Off => "Off",
+                RepeatMode::All => "All",
+                RepeatMode::One => "One",
+            }
+            .into(),
+        ),
+        (
+            "Shuffle".into(),
+            match settings.shuffle {
+                ShuffleMode::Off => "Off",
+                ShuffleMode::On => "On",
+            }
+            .into(),
+        ),
+        ("Theme".into(), settings.theme.clone()),
+    ]
+}
+
+fn render_setting_row<'a>(
+    label: &str,
+    value: &str,
+    is_selected: bool,
+    is_editing: bool,
+    edit_buffer: &str,
+) -> ListItem<'a> {
+    let label_style = if is_selected {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let prefix = if is_selected { " > " } else { "   " };
+
+    if is_editing {
+        ListItem::new(Line::from(vec![
+            Span::styled(format!("{prefix}{:<24}", label), label_style),
+            Span::styled(
+                edit_buffer.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "_",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::SLOW_BLINK),
+            ),
+        ]))
+    } else {
+        let value_style = if is_selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        ListItem::new(Line::from(vec![
+            Span::styled(format!("{prefix}{:<24}", label), label_style),
+            Span::styled(value.to_string(), value_style),
+        ]))
     }
 }

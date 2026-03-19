@@ -78,7 +78,6 @@ pub fn scan_directory(root: &Path, tx: Sender<ScanEvent>) {
 
     let library = Library {
         artists,
-        all_tracks: tracks,
         scanning: false,
     };
 

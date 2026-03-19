@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod config;
+mod coordinator;
 mod library;
 mod playlist;
 mod pomodoro;

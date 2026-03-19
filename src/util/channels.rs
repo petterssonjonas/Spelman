@@ -18,6 +18,10 @@ pub enum AudioCommand {
     Seek(Duration),
     /// Set volume (0.0 to 1.0).
     SetVolume(f32),
+    /// Set all 10 EQ band gains at once (dB, clamped to –12 … +12).
+    SetEq([f32; 10]),
+    /// Toggle the equalizer on or off.
+    ToggleEq,
 }
 
 /// Events sent from the audio engine back to the UI thread.
@@ -45,5 +49,5 @@ pub enum AudioEvent {
     /// Decoded audio level for simple visualizer (RMS of recent samples, 0.0-1.0).
     Level(f32),
     /// Frequency spectrum bars for CAVA-style visualizer (normalized 0.0-1.0).
-    Spectrum(Vec<f32>),
+    Spectrum([f32; 32]),
 }

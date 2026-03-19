@@ -2,38 +2,25 @@ use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::util::channels::AudioCommand;
+use crate::config::settings::BindableAction;
 
 /// Actions the input handler can produce.
 pub enum Action {
-    AudioCmd(AudioCommand),
-    Quit,
-    VolumeUp,
-    VolumeDown,
-    SeekForward,
-    SeekBackward,
-    /// Switch to tab (0-indexed).
-    SwitchTab(usize),
-    /// Next track in queue.
-    NextTrack,
-    /// Previous track in queue.
-    PrevTrack,
+    /// A keybinding matched a configured action.
+    Bound(BindableAction),
     /// Mouse click at (column, row).
     MouseClick { col: u16, row: u16 },
-    /// Scroll up.
-    ScrollUp,
-    /// Scroll down.
-    ScrollDown,
-    /// Navigate into selection (library drill-down, or enqueue).
-    Enter,
-    /// Navigate back (library drill-up).
-    Back,
+    /// Mouse scroll up at position.
+    MouseScrollUp { col: u16, row: u16 },
+    /// Mouse scroll down at position.
+    MouseScrollDown { col: u16, row: u16 },
     /// A character typed (for search input, etc).
     Char(char),
-    /// Backspace (for search input).
-    Backspace,
+    /// Mouse moved to position (for hover effects).
+    MouseMove { col: u16, row: u16 },
     None,
 }
 
@@ -48,8 +35,15 @@ pub fn disable_mouse() -> std::io::Result<()> {
 }
 
 /// Poll for input events and translate to actions.
-/// `search_active` indicates if the search tab is focused (chars go to search box).
-pub fn poll_input(timeout: Duration) -> std::io::Result<Action> {
+///
+/// When `text_capture` is true, all alphanumeric and symbol keys are routed
+/// as `Char(ch)` instead of their normal bindings. Only Ctrl+C, Enter, Esc,
+/// Backspace, and arrow keys keep special meaning.
+pub fn poll_input(
+    timeout: Duration,
+    text_capture: bool,
+    key_lookup: &HashMap<KeyCode, BindableAction>,
+) -> std::io::Result<Action> {
     if !event::poll(timeout)? {
         return Ok(Action::None);
     }
@@ -59,47 +53,50 @@ pub fn poll_input(timeout: Duration) -> std::io::Result<Action> {
     match ev {
         Event::Key(KeyEvent {
             code, modifiers, ..
-        }) => Ok(match code {
-            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                Action::Quit
+        }) => {
+            // Ctrl+C always quits (hardcoded safety).
+            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                return Ok(Action::Bound(BindableAction::Quit));
             }
-            KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
-            KeyCode::Char(' ') => {
-                Action::AudioCmd(AudioCommand::TogglePlayPause)
+
+            // In text capture mode, route most keys as Char.
+            if text_capture {
+                return Ok(match code {
+                    KeyCode::Enter => Action::Bound(BindableAction::Enter),
+                    KeyCode::Esc => Action::Bound(BindableAction::Back),
+                    KeyCode::Backspace => Action::Bound(BindableAction::Backspace),
+                    KeyCode::Down => Action::Bound(BindableAction::ScrollDown),
+                    KeyCode::Up => Action::Bound(BindableAction::ScrollUp),
+                    KeyCode::Tab => Action::Bound(BindableAction::TabNext),
+                    KeyCode::BackTab => Action::Bound(BindableAction::TabPrev),
+                    KeyCode::Char(ch) => Action::Char(ch),
+                    _ => Action::None,
+                });
             }
-            KeyCode::Char('+') | KeyCode::Char('=') => Action::VolumeUp,
-            KeyCode::Char('-') | KeyCode::Char('_') => Action::VolumeDown,
-            KeyCode::Right | KeyCode::Char('l') => Action::SeekForward,
-            KeyCode::Left | KeyCode::Char('h') => Action::SeekBackward,
-            // Tab switching: 1-6.
-            KeyCode::Char('1') => Action::SwitchTab(0),
-            KeyCode::Char('2') => Action::SwitchTab(1),
-            KeyCode::Char('3') => Action::SwitchTab(2),
-            KeyCode::Char('4') => Action::SwitchTab(3),
-            KeyCode::Char('5') => Action::SwitchTab(4),
-            KeyCode::Char('6') => Action::SwitchTab(5),
-            KeyCode::Tab => Action::SwitchTab(usize::MAX),
-            KeyCode::BackTab => Action::SwitchTab(usize::MAX - 1),
-            // Queue controls.
-            KeyCode::Char('n') => Action::NextTrack,
-            KeyCode::Char('p') => Action::PrevTrack,
-            // Navigation.
-            KeyCode::Enter => Action::Enter,
-            KeyCode::Esc => Action::Back,
-            KeyCode::Backspace => Action::Backspace,
-            KeyCode::Char('j') | KeyCode::Down => Action::ScrollDown,
-            KeyCode::Char('k') | KeyCode::Up => Action::ScrollUp,
-            // Pass through other characters for search/settings.
-            KeyCode::Char(ch) => Action::Char(ch),
-            _ => Action::None,
-        }),
+
+            // Normal mode: look up the key in the bindings.
+            if let Some(&action) = key_lookup.get(&code) {
+                return Ok(Action::Bound(action));
+            }
+
+            // Unbound character keys pass through for context handling.
+            if let KeyCode::Char(ch) = code {
+                return Ok(Action::Char(ch));
+            }
+
+            Ok(Action::None)
+        }
         Event::Mouse(MouseEvent { kind, column, row, .. }) => {
             Ok(match kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     Action::MouseClick { col: column, row }
                 }
-                MouseEventKind::ScrollUp => Action::ScrollUp,
-                MouseEventKind::ScrollDown => Action::ScrollDown,
+                MouseEventKind::Down(MouseButton::Right) => Action::Bound(BindableAction::Back),
+                MouseEventKind::ScrollUp => Action::MouseScrollUp { col: column, row },
+                MouseEventKind::ScrollDown => Action::MouseScrollDown { col: column, row },
+                MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
+                    Action::MouseMove { col: column, row }
+                }
                 _ => Action::None,
             })
         }

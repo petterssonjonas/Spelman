@@ -159,7 +159,8 @@ impl PomodoroTimer {
         match self.phase {
             PomodoroPhase::Work => {
                 self.sessions_completed += 1;
-                if self.sessions_completed % self.sessions_before_long_break == 0 {
+                let cycle = self.sessions_before_long_break.max(1);
+                if self.sessions_completed % cycle == 0 {
                     self.phase = PomodoroPhase::LongBreak;
                 } else {
                     self.phase = PomodoroPhase::ShortBreak;
