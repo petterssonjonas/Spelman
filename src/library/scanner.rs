@@ -129,12 +129,27 @@ fn is_audio_file(path: &Path) -> bool {
 }
 
 fn scan_file(path: &Path) -> Option<Track> {
-    let tagged = lofty::probe::Probe::open(path)
-        .ok()?
-        .guess_file_type()
-        .ok()?
-        .read()
-        .ok()?;
+    let probe = match lofty::probe::Probe::open(path) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Skipping {} (open): {e}", path.display());
+            return None;
+        }
+    };
+    let typed = match probe.guess_file_type() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Skipping {} (probe): {e}", path.display());
+            return None;
+        }
+    };
+    let tagged = match typed.read() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("Skipping {} (read): {e}", path.display());
+            return None;
+        }
+    };
 
     let tag = tagged.primary_tag().or(tagged.first_tag());
 

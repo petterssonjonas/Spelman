@@ -10,6 +10,8 @@ pub struct ProgressBar {
     pub style: Style,
     pub filled_char: char,
     pub empty_char: char,
+    /// Width as a fraction of the available area (0.0–1.0). Defaults to 0.8.
+    pub width_fraction: f64,
 }
 
 impl Default for ProgressBar {
@@ -20,6 +22,7 @@ impl Default for ProgressBar {
             style: Style::default().fg(Color::Cyan),
             filled_char: '━',
             empty_char: '─',
+            width_fraction: 0.8,
         }
     }
 }
@@ -42,13 +45,19 @@ impl Widget for ProgressBar {
             return;
         }
 
+        // Shrink to width_fraction of the available area, centered.
+        let inner_width = ((area.width as f64) * self.width_fraction.clamp(0.1, 1.0)) as u16;
+        let inner_width = inner_width.max(20);
+        let x_offset = (area.width.saturating_sub(inner_width)) / 2;
+        let inner_x = area.x + x_offset;
+
         let time_left = format_duration(self.elapsed);
         let time_right = format_duration(self.total);
         let overhead = time_left.len() + time_right.len() + 2;
-        if (area.width as usize) <= overhead {
+        if (inner_width as usize) <= overhead {
             return;
         }
-        let bar_width = area.width as usize - overhead;
+        let bar_width = inner_width as usize - overhead;
 
         if bar_width < 4 {
             return;
@@ -64,14 +73,14 @@ impl Widget for ProgressBar {
 
         // Render time left.
         buf.set_string(
-            area.x,
+            inner_x,
             area.y,
             &time_left,
             Style::default().fg(Color::White),
         );
 
         // Render bar.
-        let bar_x = area.x + time_left.len() as u16 + 1;
+        let bar_x = inner_x + time_left.len() as u16 + 1;
         let filled_str: String = std::iter::repeat(self.filled_char).take(filled).collect();
         let empty_str: String = std::iter::repeat(self.empty_char).take(bar_width - filled).collect();
         buf.set_string(bar_x, area.y, &filled_str, self.style);

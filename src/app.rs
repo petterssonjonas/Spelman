@@ -22,7 +22,7 @@ use crate::ui::input::{self, Action};
 use crate::ui::layout;
 use crate::ui::tabs::home::{HomePane, HomeState, HomeTab};
 use crate::ui::tabs::library::{LibraryState, LibrarySortMode, LibraryTab, LibraryView};
-use crate::ui::tabs::playing::{PlaybackState, PlayingTab};
+use crate::ui::tabs::playing::{PlaybackState, PlayingTab, compute_art_rows, compute_art_rect};
 use crate::ui::tabs::playlists::PlaylistsState;
 use crate::ui::tabs::pomodoro::PomodoroTab;
 use crate::ui::tabs::search::{SearchState, SearchTab};
@@ -79,6 +79,16 @@ pub struct App {
     pomodoro_visible: bool,
     /// Keybindings reference popup visible.
     keybindings_visible: bool,
+    /// Playlist picker popup visible.
+    playlist_picker_visible: bool,
+    /// Selected index in the playlist picker.
+    playlist_picker_selected: usize,
+    /// Tracks waiting to be added to a playlist (set before opening picker).
+    playlist_picker_tracks: Vec<PathBuf>,
+    /// Recently played popup visible.
+    recent_popup_visible: bool,
+    /// Selected index in the recently played popup.
+    recent_popup_selected: usize,
     /// Reverse lookup: KeyCode → BindableAction, built from settings.
     key_lookup: HashMap<KeyCode, BindableAction>,
     /// Glimmer effect: when the last wave completed (or app start).
@@ -89,6 +99,22 @@ pub struct App {
     focus_tabbar: bool,
     /// Keybindings hint rect at bottom of Home tab (for mouse click).
     keybindings_hint_rect: Option<Rect>,
+    /// Queue indicator popup visible.
+    queue_popup_visible: bool,
+    /// Selected index in queue popup.
+    queue_popup_selected: usize,
+    /// Queue indicator rect in tab bar (for mouse click).
+    queue_indicator_rect: Option<Rect>,
+    /// Name of the currently active playlist (set when a playlist is started).
+    active_playlist: Option<String>,
+    /// Playlist indicator rect in tab bar (for mouse click).
+    playlist_indicator_rect: Option<Rect>,
+    /// Active playlist popup visible.
+    active_playlist_popup_visible: bool,
+    /// Selected index in the active playlist popup.
+    active_playlist_popup_selected: usize,
+    /// Close button [X] rect in tab bar.
+    close_button_rect: Option<Rect>,
 }
 
 /// Where a new playlist's tracks come from.
@@ -135,10 +161,23 @@ impl App {
             search_visible: false,
             pomodoro_visible: false,
             keybindings_visible: false,
+            playlist_picker_visible: false,
+            playlist_picker_selected: 0,
+            playlist_picker_tracks: Vec::new(),
+            recent_popup_visible: false,
+            recent_popup_selected: 0,
             glimmer_last: Instant::now(),
             glimmer_wave: None,
             focus_tabbar: true,
             keybindings_hint_rect: None,
+            queue_popup_visible: false,
+            queue_popup_selected: 0,
+            queue_indicator_rect: None,
+            active_playlist: None,
+            playlist_indicator_rect: None,
+            active_playlist_popup_visible: false,
+            active_playlist_popup_selected: 0,
+            close_button_rect: None,
         }
     }
 
@@ -177,7 +216,7 @@ impl App {
     fn record_recent(&mut self, path: &Path) {
         self.recent_tracks.retain(|p| p != path);
         self.recent_tracks.insert(0, path.to_path_buf());
-        self.recent_tracks.truncate(50);
+        self.recent_tracks.truncate(25);
     }
 
     /// Load recently played tracks from disk.
@@ -340,10 +379,65 @@ impl App {
                     ));
                 }
 
+                // Render tab bar.
                 frame.render_widget(
                     Paragraph::new(Line::from(tab_spans)),
                     header,
                 );
+
+                // Right-aligned indicators: [Playlist] [Queue] [X]
+                // Build from right to left.
+                let buf = frame.buffer_mut();
+                let close_label = " [X] ";
+                let close_len = close_label.len() as u16;
+                let close_x = header.x + header.width.saturating_sub(close_len);
+                self.close_button_rect = Some(Rect {
+                    x: close_x,
+                    y: header.y,
+                    width: close_len,
+                    height: 1,
+                });
+                buf.set_string(close_x, header.y, close_label, Style::default().fg(Color::Red));
+
+                let mut right_x = close_x; // next indicator goes left of this
+
+                // Queue indicator.
+                let queue_len = self.player.queue.len();
+                if queue_len > 0 {
+                    let queue_label = format!(" Queue ({queue_len}) ");
+                    let queue_label_len = queue_label.len() as u16;
+                    let qx = right_x.saturating_sub(queue_label_len);
+                    self.queue_indicator_rect = Some(Rect {
+                        x: qx, y: header.y, width: queue_label_len, height: 1,
+                    });
+                    let qi_style = if self.queue_popup_visible {
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                    } else {
+                        Style::default().fg(highlight)
+                    };
+                    buf.set_string(qx, header.y, &queue_label, qi_style);
+                    right_x = qx;
+                } else {
+                    self.queue_indicator_rect = None;
+                }
+
+                // Active playlist indicator.
+                if let Some(ref pl_name) = self.active_playlist {
+                    let pl_label = format!(" {pl_name} ");
+                    let pl_label_len = pl_label.len() as u16;
+                    let px = right_x.saturating_sub(pl_label_len);
+                    self.playlist_indicator_rect = Some(Rect {
+                        x: px, y: header.y, width: pl_label_len, height: 1,
+                    });
+                    let pl_style = if self.active_playlist_popup_visible {
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                    } else {
+                        Style::default().fg(highlight)
+                    };
+                    buf.set_string(px, header.y, &pl_label, pl_style);
+                } else {
+                    self.playlist_indicator_rect = None;
+                }
 
                 // Main content.
                 match self.active_tab {
@@ -407,13 +501,12 @@ impl App {
                             },
                             content,
                         );
-                        // Compute rects for mouse zones.
-                        let art_rows = if self.player.album_art.has_art {
-                            let art_h = self.player.album_art.cells.len() as u16;
-                            art_h.min(content.height / 3)
-                        } else {
-                            0
-                        };
+                        // Compute rects for mouse zones (must match PlayingTab layout).
+                        let art_rows = compute_art_rows(
+                            self.player.album_art.has_art,
+                            self.player.album_art.cells.len(),
+                            content.height,
+                        );
                         // Controls line (play/pause + volume).
                         let controls_y = content.y + art_rows + 3;
                         if controls_y < content.y + content.height {
@@ -424,13 +517,16 @@ impl App {
                                 height: 1,
                             });
                         }
-                        // Progress/seek bar.
+                        // Progress/seek bar (centered at 80% width).
                         let progress_y = content.y + art_rows + 4;
                         if progress_y < content.y + content.height {
+                            let bar_inner_w = ((content.width as f64) * 0.8) as u16;
+                            let bar_inner_w = bar_inner_w.max(20);
+                            let bar_x_off = (content.width.saturating_sub(bar_inner_w)) / 2;
                             self.progress_bar_rect = Some(Rect {
-                                x: content.x,
+                                x: content.x + bar_x_off,
                                 y: progress_y,
-                                width: content.width,
+                                width: bar_inner_w,
                                 height: 1,
                             });
                         }
@@ -461,10 +557,16 @@ impl App {
                             .first()
                             .cloned()
                             .unwrap_or_else(|| "a".into());
+                        let eq_key = self.settings.keybindings
+                            .keys_for(BindableAction::EnqueueTrack)
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "E".into());
                         frame.render_widget(
                             LibraryTab {
                                 state: &self.library_state,
                                 playlist_key: &pl_key,
+                                enqueue_key: &eq_key,
                                 focus_tabbar: self.focus_tabbar,
                             },
                             content,
@@ -559,6 +661,113 @@ impl App {
                     render_keybindings_popup(buf, inner, &self.settings, accent, text_color);
                 }
 
+                // Playlist picker popup.
+                if self.playlist_picker_visible {
+                    let popup = centered_popup(area, 50, 60);
+                    let buf = frame.buffer_mut();
+                    for y in popup.y..popup.y + popup.height {
+                        for x in popup.x..popup.x + popup.width {
+                            if let Some(cell) = buf.cell_mut((x, y)) {
+                                cell.reset();
+                            }
+                        }
+                    }
+                    render_popup_border(buf, popup, "Add to Playlist", accent);
+                    let inner = Rect {
+                        x: popup.x + 1,
+                        y: popup.y + 1,
+                        width: popup.width.saturating_sub(2),
+                        height: popup.height.saturating_sub(2),
+                    };
+                    render_playlist_picker(
+                        buf, inner,
+                        &self.playlists_state.playlists,
+                        self.playlist_picker_selected,
+                        self.playlist_picker_tracks.len(),
+                        text_color,
+                    );
+                }
+
+                // Recently played popup.
+                if self.recent_popup_visible {
+                    let popup = centered_popup(area, 60, 70);
+                    let buf = frame.buffer_mut();
+                    for y in popup.y..popup.y + popup.height {
+                        for x in popup.x..popup.x + popup.width {
+                            if let Some(cell) = buf.cell_mut((x, y)) {
+                                cell.reset();
+                            }
+                        }
+                    }
+                    render_popup_border(buf, popup, "Recently Played", accent);
+                    let inner = Rect {
+                        x: popup.x + 1,
+                        y: popup.y + 1,
+                        width: popup.width.saturating_sub(2),
+                        height: popup.height.saturating_sub(2),
+                    };
+                    render_recent_popup(
+                        buf, inner,
+                        &self.recent_tracks,
+                        self.recent_popup_selected,
+                        text_color,
+                    );
+                }
+
+                // Active playlist popup.
+                if self.active_playlist_popup_visible {
+                    if let Some(ref pl_name) = self.active_playlist {
+                        let popup = centered_popup(area, 50, 60);
+                        let buf = frame.buffer_mut();
+                        for y in popup.y..popup.y + popup.height {
+                            for x in popup.x..popup.x + popup.width {
+                                if let Some(cell) = buf.cell_mut((x, y)) {
+                                    cell.reset();
+                                }
+                            }
+                        }
+                        render_popup_border(buf, popup, pl_name, accent);
+                        let inner = Rect {
+                            x: popup.x + 1,
+                            y: popup.y + 1,
+                            width: popup.width.saturating_sub(2),
+                            height: popup.height.saturating_sub(2),
+                        };
+                        render_queue_popup(
+                            buf, inner,
+                            &self.player.queue,
+                            self.active_playlist_popup_selected,
+                            text_color,
+                        );
+                    }
+                }
+
+                // Queue popup.
+                if self.queue_popup_visible {
+                    let popup = centered_popup(area, 50, 60);
+                    let buf = frame.buffer_mut();
+                    for y in popup.y..popup.y + popup.height {
+                        for x in popup.x..popup.x + popup.width {
+                            if let Some(cell) = buf.cell_mut((x, y)) {
+                                cell.reset();
+                            }
+                        }
+                    }
+                    render_popup_border(buf, popup, "Queue", accent);
+                    let inner = Rect {
+                        x: popup.x + 1,
+                        y: popup.y + 1,
+                        width: popup.width.saturating_sub(2),
+                        height: popup.height.saturating_sub(2),
+                    };
+                    render_queue_popup(
+                        buf, inner,
+                        &self.player.queue,
+                        self.queue_popup_selected,
+                        text_color,
+                    );
+                }
+
                 // Playlist naming overlay at bottom of screen.
                 if self.naming_playlist.is_some() {
                     let footer_y = area.y + area.height.saturating_sub(1);
@@ -580,12 +789,11 @@ impl App {
                 let buf = frame.buffer_mut();
                 if self.active_tab == 1 {
                     if let (Some(progress), Some(content_rect)) = (glimmer_progress, self.content_rect) {
-                        let art_rows = if self.player.album_art.has_art {
-                            let art_h = self.player.album_art.cells.len() as u16;
-                            art_h.min(content_rect.height / 3)
-                        } else {
-                            0
-                        };
+                        let art_rows = compute_art_rows(
+                            self.player.album_art.has_art,
+                            self.player.album_art.cells.len(),
+                            content_rect.height,
+                        );
 
                         let text_rows = [
                             content_rect.y + art_rows,     // title
@@ -831,11 +1039,73 @@ impl App {
                     self.player.send(AudioCommand::ToggleEq);
                 }
             }
+            AddToPlaylist => {
+                if self.active_tab == 2 && self.naming_playlist.is_none() {
+                    if self.playlist_picker_visible {
+                        self.playlist_picker_visible = false;
+                    } else {
+                        // Gather tracks to add from library.
+                        let checked = self.library_state.take_checked_paths();
+                        let tracks = if !checked.is_empty() {
+                            checked
+                        } else {
+                            match &self.library_state.view {
+                                LibraryView::Tracks { .. } => {
+                                    self.library_state.selected_track_path()
+                                        .into_iter().collect()
+                                }
+                                _ => {
+                                    self.library_state.selected_flat_song_path()
+                                        .into_iter().collect()
+                                }
+                            }
+                        };
+                        if !tracks.is_empty() {
+                            self.playlist_picker_tracks = tracks;
+                            self.playlist_picker_selected = 0;
+                            self.playlist_picker_visible = true;
+                            self.search_visible = false;
+                            self.pomodoro_visible = false;
+                            self.keybindings_visible = false;
+                            self.recent_popup_visible = false;
+                        }
+                    }
+                }
+            }
+            ShowRecentlyPlayed => {
+                if self.naming_playlist.is_none() {
+                    self.recent_popup_visible = !self.recent_popup_visible;
+                    if self.recent_popup_visible {
+                        self.recent_popup_selected = 0;
+                        self.search_visible = false;
+                        self.pomodoro_visible = false;
+                        self.keybindings_visible = false;
+                        self.playlist_picker_visible = false;
+                    }
+                }
+            }
+            EnqueueTrack => {
+                if self.active_tab == 2 {
+                    // Enqueue checked tracks, or the selected track if none checked.
+                    let checked = self.library_state.take_checked_paths();
+                    if !checked.is_empty() {
+                        for path in checked {
+                            self.player.queue.push(path);
+                        }
+                    } else {
+                        // Enqueue single selected track.
+                        let path = match &self.library_state.view {
+                            LibraryView::Tracks { .. } => self.library_state.selected_track_path(),
+                            _ => self.library_state.selected_flat_song_path(),
+                        };
+                        if let Some(path) = path {
+                            self.player.queue.push(path);
+                        }
+                    }
+                }
+            }
             SavePlaylist => {
-                if self.active_tab == 1 && !self.player.queue.is_empty() {
-                    self.naming_playlist = Some(PlaylistSource::Queue);
-                    self.playlist_name_buf.clear();
-                } else if self.active_tab == 2 {
+                if self.active_tab == 2 {
                     let selected = self.library_state.take_checked_paths();
                     if !selected.is_empty() {
                         self.naming_playlist = Some(PlaylistSource::LibrarySelection(selected));
@@ -940,11 +1210,13 @@ impl App {
                     }
                     HomePane::Playlists => {
                         if let Some(pl) = self.playlists_state.playlists.get(self.home_state.playlist_selected) {
+                            let name = pl.name.clone();
                             let tracks = pl.tracks.clone();
                             if let Some(first) = tracks.first().cloned() {
                                 self.player.queue.clear();
                                 self.player.queue.extend(tracks);
                                 self.player.send(AudioCommand::Play(first));
+                                self.active_playlist = Some(name);
                                 self.active_tab = 1;
                             }
                         }
@@ -952,11 +1224,12 @@ impl App {
                 }
             }
             2 => {
-                // Library: enqueue based on view level.
+                // Library: enqueue based on view level, switch to Playing tab.
                 match &self.library_state.view {
                     LibraryView::Tracks { .. } => {
                         if let Some(path) = self.library_state.selected_track_path() {
                             self.player.enqueue_and_play(path);
+                            self.active_tab = 1;
                         }
                     }
                     LibraryView::Albums { artist } => {
@@ -969,6 +1242,8 @@ impl App {
                                 self.player.queue.clear();
                                 self.player.queue.extend(paths);
                                 self.player.send(AudioCommand::Play(first));
+                                self.active_playlist = None;
+                                self.active_tab = 1;
                             }
                         }
                     }
@@ -984,6 +1259,8 @@ impl App {
                                 self.player.queue.clear();
                                 self.player.queue.extend(paths);
                                 self.player.send(AudioCommand::Play(first));
+                                self.active_playlist = None;
+                                self.active_tab = 1;
                             }
                         }
                     }
@@ -1004,6 +1281,30 @@ impl App {
             return;
         }
         if self.pomodoro_visible {
+            return;
+        }
+        if self.playlist_picker_visible {
+            if self.playlist_picker_selected + 1 < self.playlists_state.playlists.len() {
+                self.playlist_picker_selected += 1;
+            }
+            return;
+        }
+        if self.recent_popup_visible {
+            if self.recent_popup_selected + 1 < self.recent_tracks.len() {
+                self.recent_popup_selected += 1;
+            }
+            return;
+        }
+        if self.queue_popup_visible {
+            if self.queue_popup_selected + 1 < self.player.queue.len() {
+                self.queue_popup_selected += 1;
+            }
+            return;
+        }
+        if self.active_playlist_popup_visible {
+            if self.active_playlist_popup_selected + 1 < self.player.queue.len() {
+                self.active_playlist_popup_selected += 1;
+            }
             return;
         }
         // From tab bar, pressing Down enters the content.
@@ -1036,6 +1337,22 @@ impl App {
             return;
         }
         if self.pomodoro_visible {
+            return;
+        }
+        if self.playlist_picker_visible {
+            self.playlist_picker_selected = self.playlist_picker_selected.saturating_sub(1);
+            return;
+        }
+        if self.recent_popup_visible {
+            self.recent_popup_selected = self.recent_popup_selected.saturating_sub(1);
+            return;
+        }
+        if self.queue_popup_visible {
+            self.queue_popup_selected = self.queue_popup_selected.saturating_sub(1);
+            return;
+        }
+        if self.active_playlist_popup_visible {
+            self.active_playlist_popup_selected = self.active_playlist_popup_selected.saturating_sub(1);
             return;
         }
         if self.focus_tabbar {
@@ -1097,6 +1414,59 @@ impl App {
             return;
         }
 
+        // Playlist picker: add tracks to selected playlist.
+        if self.playlist_picker_visible {
+            if let Some(playlist) = self.playlists_state.playlists.get_mut(self.playlist_picker_selected) {
+                let new_tracks = std::mem::take(&mut self.playlist_picker_tracks);
+                playlist.tracks.extend(new_tracks);
+                let updated = playlist.clone();
+                match PlaylistManager::save(&updated) {
+                    Ok(()) => {
+                        tracing::info!("Added tracks to playlist '{}'", updated.name);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to save playlist: {e}");
+                    }
+                }
+            }
+            self.playlist_picker_visible = false;
+            return;
+        }
+
+        // Active playlist popup: play selected track.
+        if self.active_playlist_popup_visible {
+            let tracks = self.player.queue.tracks();
+            if let Some(path) = tracks.get(self.active_playlist_popup_selected).cloned() {
+                self.player.queue.set_current(self.active_playlist_popup_selected);
+                self.player.send(AudioCommand::Play(path));
+                self.active_tab = 1;
+            }
+            self.active_playlist_popup_visible = false;
+            return;
+        }
+
+        // Queue popup: play selected track.
+        if self.queue_popup_visible {
+            let tracks = self.player.queue.tracks();
+            if let Some(path) = tracks.get(self.queue_popup_selected).cloned() {
+                self.player.queue.set_current(self.queue_popup_selected);
+                self.player.send(AudioCommand::Play(path));
+                self.active_tab = 1;
+            }
+            self.queue_popup_visible = false;
+            return;
+        }
+
+        // Recently played: play selected track.
+        if self.recent_popup_visible {
+            if let Some(path) = self.recent_tracks.get(self.recent_popup_selected).cloned() {
+                self.player.enqueue_and_play(path);
+                self.active_tab = 1;
+            }
+            self.recent_popup_visible = false;
+            return;
+        }
+
         // Search popup: play selected result.
         if self.search_visible {
             if let Some(path) = self.search_state.selected_track_path_from(&self.library_state.library) {
@@ -1127,6 +1497,7 @@ impl App {
                     }
                     HomePane::Playlists => {
                         if let Some(pl) = self.playlists_state.playlists.get(self.home_state.playlist_selected) {
+                            let name = pl.name.clone();
                             let tracks = pl.tracks.clone();
                             if !tracks.is_empty() {
                                 self.player.queue.clear();
@@ -1134,6 +1505,7 @@ impl App {
                                 if let Some(path) = self.player.queue.current_track().cloned() {
                                     self.player.send(AudioCommand::Play(path));
                                 }
+                                self.active_playlist = Some(name);
                                 self.active_tab = 1;
                             }
                         }
@@ -1145,6 +1517,7 @@ impl App {
                 if let LibraryView::Tracks { .. } = &self.library_state.view {
                     if let Some(path) = self.library_state.selected_track_path() {
                         self.player.enqueue_and_play(path);
+                        self.active_tab = 1;
                     }
                 } else if matches!(
                     (&self.library_state.view, self.library_state.sort_mode),
@@ -1153,6 +1526,7 @@ impl App {
                     // Songs flat-list: enter plays the selected song.
                     if let Some(path) = self.library_state.selected_flat_song_path() {
                         self.player.enqueue_and_play(path);
+                        self.active_tab = 1;
                     }
                 } else {
                     self.library_state.enter();
@@ -1190,6 +1564,27 @@ impl App {
 
         if self.keybindings_visible {
             self.keybindings_visible = false;
+            return;
+        }
+
+        if self.playlist_picker_visible {
+            self.playlist_picker_visible = false;
+            self.playlist_picker_tracks.clear();
+            return;
+        }
+
+        if self.recent_popup_visible {
+            self.recent_popup_visible = false;
+            return;
+        }
+
+        if self.queue_popup_visible {
+            self.queue_popup_visible = false;
+            return;
+        }
+
+        if self.active_playlist_popup_visible {
+            self.active_playlist_popup_visible = false;
             return;
         }
 
@@ -1294,6 +1689,70 @@ impl App {
                     return;
                 }
             }
+            if self.playlist_picker_visible {
+                let popup = centered_popup(area, 50, 60);
+                let close_x = popup.x + popup.width.saturating_sub(close_str_len + 1);
+                if row == popup.y && col >= close_x && col < close_x + close_str_len {
+                    self.playlist_picker_visible = false;
+                    self.playlist_picker_tracks.clear();
+                    return;
+                }
+            }
+            if self.recent_popup_visible {
+                let popup = centered_popup(area, 60, 70);
+                let close_x = popup.x + popup.width.saturating_sub(close_str_len + 1);
+                if row == popup.y && col >= close_x && col < close_x + close_str_len {
+                    self.recent_popup_visible = false;
+                    return;
+                }
+            }
+            if self.queue_popup_visible {
+                let popup = centered_popup(area, 50, 60);
+                let close_x = popup.x + popup.width.saturating_sub(close_str_len + 1);
+                if row == popup.y && col >= close_x && col < close_x + close_str_len {
+                    self.queue_popup_visible = false;
+                    return;
+                }
+            }
+            if self.active_playlist_popup_visible {
+                let popup = centered_popup(area, 50, 60);
+                let close_x = popup.x + popup.width.saturating_sub(close_str_len + 1);
+                if row == popup.y && col >= close_x && col < close_x + close_str_len {
+                    self.active_playlist_popup_visible = false;
+                    return;
+                }
+            }
+        }
+
+        // Close button [X] click.
+        if let Some(cb_rect) = self.close_button_rect {
+            if row == cb_rect.y && col >= cb_rect.x && col < cb_rect.x + cb_rect.width {
+                self.player.shutdown();
+                self.should_quit = true;
+                return;
+            }
+        }
+
+        // Queue indicator click.
+        if let Some(qi_rect) = self.queue_indicator_rect {
+            if row == qi_rect.y && col >= qi_rect.x && col < qi_rect.x + qi_rect.width {
+                self.queue_popup_visible = !self.queue_popup_visible;
+                if self.queue_popup_visible {
+                    self.queue_popup_selected = self.player.queue.current_index().unwrap_or(0);
+                }
+                return;
+            }
+        }
+
+        // Playlist indicator click.
+        if let Some(pi_rect) = self.playlist_indicator_rect {
+            if row == pi_rect.y && col >= pi_rect.x && col < pi_rect.x + pi_rect.width {
+                self.active_playlist_popup_visible = !self.active_playlist_popup_visible;
+                if self.active_playlist_popup_visible {
+                    self.active_playlist_popup_selected = self.player.queue.current_index().unwrap_or(0);
+                }
+                return;
+            }
         }
 
         // Tab bar click.
@@ -1304,8 +1763,12 @@ impl App {
                     let label_len = name.len() as u16 + 2;
                     if col >= x && col < x + label_len {
                         if i < TAB_COUNT {
+                            let prev = self.active_tab;
                             self.active_tab = i;
                             self.focus_tabbar = true;
+                            if i == 0 && prev != 0 {
+                                self.home_state.randomize_logo();
+                            }
                         }
                         return;
                     }
@@ -1346,30 +1809,40 @@ impl App {
             }
         }
 
-        // Playing tab click — album art area toggles play/pause; title/artist/album does nothing.
+        // Playing tab click — album art or title/artist/album area toggles play/pause.
         if self.active_tab == 1 {
             if let Some(content_rect) = self.content_rect {
-                if row >= content_rect.y && row < content_rect.y + content_rect.height
-                    && col >= content_rect.x && col < content_rect.x + content_rect.width
-                {
-                    let art_rows = if self.player.album_art.has_art {
-                        let art_h = self.player.album_art.cells.len() as u16;
-                        art_h.min(content_rect.height / 3)
-                    } else {
-                        0
-                    };
-                    // Rows: [art_rows] art, then title, artist, album (3 text rows).
-                    let text_start = content_rect.y + art_rows;
-                    let text_end = text_start + 3;
-                    if row >= content_rect.y && row < text_start {
-                        // Album art area — toggle play/pause.
+                let art_rows = compute_art_rows(
+                    self.player.album_art.has_art,
+                    self.player.album_art.cells.len(),
+                    content_rect.height,
+                );
+                // Click on album art (exact pixel area).
+                let art_source_cols = self.player.album_art.cells.first().map_or(0, |r| r.len());
+                if let Some(art_rect) = compute_art_rect(
+                    self.player.album_art.has_art,
+                    self.player.album_art.cells.len(),
+                    art_source_cols,
+                    content_rect.x,
+                    content_rect.y,
+                    content_rect.width,
+                    art_rows,
+                ) {
+                    if row >= art_rect.y && row < art_rect.y + art_rect.height
+                        && col >= art_rect.x && col < art_rect.x + art_rect.width
+                    {
                         self.player.toggle_play_pause();
                         return;
                     }
-                    if row >= text_start && row < text_end {
-                        // Title/artist/album text rows — do nothing.
-                        return;
-                    }
+                }
+                // Click on title/artist/album text rows → also toggle play/pause.
+                let text_start = content_rect.y + art_rows;
+                let text_end = text_start + 3;
+                if row >= text_start && row < text_end
+                    && col >= content_rect.x && col < content_rect.x + content_rect.width
+                {
+                    self.player.toggle_play_pause();
+                    return;
                 }
             }
         }
@@ -1563,11 +2036,15 @@ impl App {
             }
         }
 
-        // Default: volume.
-        if up {
-            self.player.volume_up();
-        } else {
-            self.player.volume_down();
+        // Scroll on controls line → volume.
+        if let Some(ctrl_rect) = self.controls_rect {
+            if row == ctrl_rect.y && col >= ctrl_rect.x && col < ctrl_rect.x + ctrl_rect.width {
+                if up {
+                    self.player.volume_up();
+                } else {
+                    self.player.volume_down();
+                }
+            }
         }
     }
 
@@ -1641,17 +2118,19 @@ impl App {
                 }
             }
             3 => {
-                // Settings: map row to setting index.
+                // Settings: map row to setting index, accounting for scroll.
                 if let Some(content_rect) = self.content_rect {
-                    let header_y = content_rect.y;
-                    if row > header_y
-                        && row < content_rect.y + content_rect.height
+                    let list_y = content_rect.y + 1; // skip header row
+                    let list_h = content_rect.height.saturating_sub(2) as usize; // -header -status
+                    if row >= list_y
+                        && row < list_y + list_h as u16
                         && col >= content_rect.x
                         && col < content_rect.x + content_rect.width
                     {
-                        let clicked_row = (row - header_y - 1) as usize;
-                        if clicked_row < SettingsState::item_count() {
-                            self.settings_state.selected = clicked_row;
+                        let scroll = self.settings_state.scroll_offset(list_h);
+                        let idx = scroll + (row - list_y) as usize;
+                        if idx < SettingsState::item_count() {
+                            self.settings_state.selected = idx;
                             self.focus_tabbar = false;
                         }
                     }
@@ -1878,6 +2357,223 @@ fn render_keybindings_popup(
 }
 
 use crate::util::format::format_duration;
+
+/// Render the playlist picker popup content.
+fn render_playlist_picker(
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    playlists: &[Playlist],
+    selected: usize,
+    track_count: usize,
+    text_color: Color,
+) {
+    if area.height < 2 {
+        return;
+    }
+
+    // Header line.
+    let header = format!(" Adding {} track(s) to playlist:", track_count);
+    buf.set_string(
+        area.x,
+        area.y,
+        &header,
+        Style::default().fg(Color::DarkGray),
+    );
+
+    if playlists.is_empty() {
+        buf.set_string(
+            area.x + 2,
+            area.y + 2,
+            "No playlists found. Create one first.",
+            Style::default().fg(Color::DarkGray),
+        );
+        return;
+    }
+
+    let list_y = area.y + 1;
+    let max_rows = (area.height.saturating_sub(2)) as usize;
+
+    // Scroll to keep selected visible.
+    let scroll = if selected >= max_rows {
+        selected - max_rows + 1
+    } else {
+        0
+    };
+
+    for (i, playlist) in playlists.iter().enumerate().skip(scroll).take(max_rows) {
+        let y = list_y + (i - scroll) as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        let is_sel = i == selected;
+        let prefix = if is_sel { " > " } else { "   " };
+        let track_info = format!("  ({} tracks)", playlist.tracks.len());
+        let style = if is_sel {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default().fg(text_color)
+        };
+        let info_style = if is_sel {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let name_str = format!("{prefix}{}", playlist.name);
+        let name_len = name_str.len() as u16;
+        buf.set_string(area.x, y, &name_str, style);
+        buf.set_string(area.x + name_len, y, &track_info, info_style);
+    }
+
+    // Hint at bottom.
+    let hint_y = area.y + area.height.saturating_sub(1);
+    buf.set_string(
+        area.x + 1,
+        hint_y,
+        "Enter: add  │  Esc: cancel",
+        Style::default().fg(Color::DarkGray),
+    );
+}
+
+/// Render the recently played popup content.
+fn render_recent_popup(
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    recent_tracks: &[PathBuf],
+    selected: usize,
+    text_color: Color,
+) {
+    if area.height < 2 {
+        return;
+    }
+
+    if recent_tracks.is_empty() {
+        buf.set_string(
+            area.x + 2,
+            area.y + 1,
+            "No recently played tracks.",
+            Style::default().fg(Color::DarkGray),
+        );
+        return;
+    }
+
+    let max_rows = (area.height.saturating_sub(1)) as usize;
+
+    let scroll = if selected >= max_rows {
+        selected - max_rows + 1
+    } else {
+        0
+    };
+
+    for (i, path) in recent_tracks.iter().enumerate().skip(scroll).take(max_rows) {
+        let y = area.y + (i - scroll) as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "?".into());
+        let is_sel = i == selected;
+        let prefix = if is_sel { " > " } else { "   " };
+        let style = if is_sel {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default().fg(text_color)
+        };
+        let display = format!("{prefix}{name}");
+        buf.set_string(area.x, y, &display, style);
+    }
+
+    // Hint at bottom.
+    let hint_y = area.y + area.height.saturating_sub(1);
+    buf.set_string(
+        area.x + 1,
+        hint_y,
+        "Enter: play  │  Esc: close",
+        Style::default().fg(Color::DarkGray),
+    );
+}
+
+/// Render the queue popup content.
+fn render_queue_popup(
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    queue: &crate::playlist::queue::Queue,
+    selected: usize,
+    text_color: Color,
+) {
+    if area.height < 2 {
+        return;
+    }
+
+    let tracks = queue.tracks();
+    if tracks.is_empty() {
+        buf.set_string(
+            area.x + 2,
+            area.y + 1,
+            "Queue is empty.",
+            Style::default().fg(Color::DarkGray),
+        );
+        return;
+    }
+
+    let current_idx = queue.current_index();
+    let max_rows = (area.height.saturating_sub(1)) as usize;
+
+    let scroll = if selected >= max_rows {
+        selected - max_rows + 1
+    } else {
+        0
+    };
+
+    for (i, path) in tracks.iter().enumerate().skip(scroll).take(max_rows) {
+        let y = area.y + (i - scroll) as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "?".into());
+        let is_sel = i == selected;
+        let is_current = current_idx == Some(i);
+        let prefix = if is_current && is_sel {
+            " ▶ "
+        } else if is_current {
+            " ▶ "
+        } else if is_sel {
+            " > "
+        } else {
+            "   "
+        };
+        let style = if is_sel {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else if is_current {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(text_color)
+        };
+        let display = format!("{prefix}{name}");
+        buf.set_string(area.x, y, &display, style);
+    }
+
+    // Hint at bottom.
+    let hint_y = area.y + area.height.saturating_sub(1);
+    buf.set_string(
+        area.x + 1,
+        hint_y,
+        "Enter: play  │  Esc: close",
+        Style::default().fg(Color::DarkGray),
+    );
+}
 
 /// Brighten a ratatui Color toward white by `factor` (0.0 = unchanged, 1.0 = white).
 fn brighten_color(color: Color, factor: f32) -> Color {

@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, Paragraph, Widget};
 use std::path::PathBuf;
 
-use crate::config::settings::{BindableAction, RepeatMode, Settings, ShuffleMode};
+use crate::config::settings::{BindableAction, KeyBindings, RepeatMode, Settings, ShuffleMode};
 
 /// State for the Settings tab.
 #[derive(Debug, Clone)]
@@ -176,6 +176,15 @@ impl SettingsState {
     pub fn item_count() -> usize {
         BASE_ITEM_COUNT + SEPARATOR_COUNT + BindableAction::ALL.len()
     }
+
+    /// Compute scroll offset for a given visible height (must match render logic).
+    pub fn scroll_offset(&self, visible_height: usize) -> usize {
+        if self.selected >= visible_height {
+            self.selected - visible_height + 1
+        } else {
+            0
+        }
+    }
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -275,10 +284,14 @@ impl<'a> Widget for SettingsTab<'a> {
                 Style::default().fg(Color::DarkGray)
             };
 
+            let default_keys = KeyBindings::default_keys_for(action);
+            let default_display = format!("  (Default: {})", default_keys.join(", "));
+
             let prefix = if is_selected { " > " } else { "   " };
             list_items.push(ListItem::new(Line::from(vec![
                 Span::styled(format!("{prefix}{:<24}", action.label()), label_style),
                 Span::styled(keys_display, value_style),
+                Span::styled(default_display, Style::default().fg(Color::DarkGray)),
             ])));
         }
 

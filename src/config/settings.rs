@@ -121,6 +121,9 @@ pub enum BindableAction {
     // Context-specific (guarded by active tab in app.rs).
     ToggleEq,
     ToggleEqEnabled,
+    EnqueueTrack,
+    AddToPlaylist,
+    ShowRecentlyPlayed,
     SavePlaylist,
     ToggleCheckbox,
     ViewTracks,
@@ -154,7 +157,10 @@ impl BindableAction {
             Self::ToggleKeybindings => "Keybindings",
             Self::ToggleEq => "Toggle EQ Panel",
             Self::ToggleEqEnabled => "Toggle EQ On/Off",
-            Self::SavePlaylist => "Save Playlist",
+            Self::EnqueueTrack => "Enqueue Track",
+            Self::AddToPlaylist => "Add to Playlist",
+            Self::ShowRecentlyPlayed => "Recently Played",
+            Self::SavePlaylist => "New Playlist",
             Self::ToggleCheckbox => "Toggle Checkbox",
             Self::ViewTracks => "View / Cycle Style",
             Self::DeletePlaylist => "Delete Playlist",
@@ -186,6 +192,9 @@ impl BindableAction {
         Self::ToggleKeybindings,
         Self::ToggleEq,
         Self::ToggleEqEnabled,
+        Self::EnqueueTrack,
+        Self::AddToPlaylist,
+        Self::ShowRecentlyPlayed,
         Self::SavePlaylist,
         Self::ToggleCheckbox,
         Self::ViewTracks,
@@ -285,6 +294,9 @@ impl Default for KeyBindings {
         b.insert(ToggleKeybindings, vec!["K".into()]);
         b.insert(ToggleEq, vec!["e".into()]);
         b.insert(ToggleEqEnabled, vec!["t".into()]);
+        b.insert(EnqueueTrack, vec!["E".into()]);
+        b.insert(AddToPlaylist, vec!["A".into()]);
+        b.insert(ShowRecentlyPlayed, vec!["R".into()]);
         b.insert(SavePlaylist, vec!["a".into()]);
         b.insert(ToggleCheckbox, vec!["x".into()]);
         b.insert(ViewTracks, vec!["v".into()]);
@@ -312,9 +324,54 @@ impl KeyBindings {
         map
     }
 
+    /// Fill in default bindings for any actions not present in the loaded config.
+    pub fn fill_missing_defaults(&mut self) {
+        let defaults = Self::default();
+        for (action, keys) in defaults.bindings {
+            self.bindings.entry(action).or_insert(keys);
+        }
+    }
+
     /// Get the key strings for a given action.
     pub fn keys_for(&self, action: BindableAction) -> &[String] {
         self.bindings.get(&action).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Get the default key strings for a given action.
+    pub fn default_keys_for(action: BindableAction) -> &'static [&'static str] {
+        use BindableAction::*;
+        match action {
+            Quit => &["q", "Q"],
+            TogglePlayPause => &["space"],
+            VolumeUp => &["+", "="],
+            VolumeDown => &["-", "_"],
+            SeekForward => &["l"],
+            SeekBackward => &["h"],
+            ScrollDown => &["j", "down"],
+            ScrollUp => &["k", "up"],
+            Enter => &["enter"],
+            Back => &["esc"],
+            Backspace => &["backspace"],
+            NextTrack => &["n"],
+            PrevTrack => &["p"],
+            TabNext => &["right"],
+            TabPrev => &["left"],
+            SwitchPane => &["tab", "backtab"],
+            ToggleSearch => &["s", "S"],
+            TogglePomodoro => &["P"],
+            ToggleKeybindings => &["K"],
+            ToggleEq => &["e"],
+            ToggleEqEnabled => &["t"],
+            EnqueueTrack => &["E"],
+            AddToPlaylist => &["A"],
+            ShowRecentlyPlayed => &["R"],
+            SavePlaylist => &["a"],
+            ToggleCheckbox => &["x"],
+            ViewTracks => &["v"],
+            DeletePlaylist => &["d"],
+            SkipPomodoro => &["f"],
+            CyclePomodoroStyle => &["v"],
+        }
     }
 
     /// Set a single key for an action, removing it from any other action first.
@@ -376,7 +433,7 @@ impl Default for Settings {
 impl Settings {
     /// Load settings from the config file, or return defaults.
     pub fn load() -> Self {
-        Self::config_path()
+        let mut settings: Self = Self::config_path()
             .and_then(|path| {
                 let content = std::fs::read_to_string(&path).ok()?;
                 match toml::from_str(&content) {
@@ -387,7 +444,10 @@ impl Settings {
                     }
                 }
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Fill in default bindings for any new actions not in the saved config.
+        settings.keybindings.fill_missing_defaults();
+        settings
     }
 
     /// Save settings to the config file.

@@ -122,6 +122,7 @@ impl PlayerCoordinator {
     pub fn seek_forward(&mut self, seek_step_secs: u64) {
         let new_pos = self.playing.elapsed + Duration::from_secs(seek_step_secs);
         if new_pos < self.playing.duration {
+            self.playing.elapsed = new_pos;
             self.engine.send(AudioCommand::Seek(new_pos));
         }
     }
@@ -130,6 +131,7 @@ impl PlayerCoordinator {
     pub fn seek_backward(&mut self, seek_step_secs: u64) {
         let new_pos = self.playing.elapsed
             .saturating_sub(Duration::from_secs(seek_step_secs));
+        self.playing.elapsed = new_pos;
         self.engine.send(AudioCommand::Seek(new_pos));
     }
 
@@ -138,6 +140,7 @@ impl PlayerCoordinator {
         let seek_pos = Duration::from_secs_f64(
             fraction * self.playing.duration.as_secs_f64(),
         );
+        self.playing.elapsed = seek_pos;
         self.engine.send(AudioCommand::Seek(seek_pos));
     }
 
@@ -190,7 +193,11 @@ impl PlayerCoordinator {
                     self.play_next(settings);
                 }
                 AudioEvent::Error(msg) => {
-                    tracing::error!("Audio error: {msg}");
+                    let path_str = self.playing.file_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "unknown".into());
+                    tracing::error!("Audio error for {path_str}: {msg}");
                 }
                 AudioEvent::Level(level) => {
                     self.playing.level = self.playing.level * 0.7 + level * 0.3;

@@ -345,6 +345,7 @@ impl LibraryState {
 pub struct LibraryTab<'a> {
     pub state: &'a LibraryState,
     pub playlist_key: &'a str,
+    pub enqueue_key: &'a str,
     pub focus_tabbar: bool,
 }
 
@@ -699,7 +700,10 @@ impl<'a> Widget for LibraryTab<'a> {
         list.render(padded(chunks[2]), buf);
 
         // Bottom hints row.
-        let hint = format!("  {}:  Save as playlist", self.playlist_key);
+        let hint = format!(
+            "  {}:  Enqueue selected tracks  │  {}:  Add to new playlist",
+            self.enqueue_key, self.playlist_key,
+        );
         Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray)))
             .centered()
             .render(chunks[3], buf);

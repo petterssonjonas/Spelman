@@ -97,16 +97,9 @@ impl<'a> Widget for PlayingTab<'a> {
         }
 
         // Compute album art display size.
-        // Fixed items below art: title(1) + artist(1) + album(1) + controls(1) + seek(1)
-        // + spacer(1) + min visualizer(4) + spacer(1) = 11 rows minimum.
         let art_source_rows = self.album_art.cells.len();
         let art_source_cols = self.album_art.cells.first().map_or(0, |r| r.len());
-        let max_art_rows = area.height.saturating_sub(11) as usize; // leave room for everything else
-        let art_rows = if self.album_art.has_art && max_art_rows >= 4 && art_source_rows > 0 {
-            art_source_rows.min(max_art_rows).min(18) as u16 // cap at 18 rows max
-        } else {
-            0
-        };
+        let art_rows = compute_art_rows(self.album_art.has_art, art_source_rows, area.height);
 
         // Layout top-to-bottom:
         //   album art | track info (3 lines) | controls (1) | seek bar (1) | spacer | visualizer | spacer | queue
@@ -205,27 +198,50 @@ impl<'a> Widget for PlayingTab<'a> {
             .render(chunks[3], buf);
         }
 
-        // --- Controls: play/pause + volume + format info ---
+        // --- Controls: play/pause + volume blocks + format info ---
         let status_icon = match self.state.playback {
             PlaybackState::Playing => "▶ Playing",
             PlaybackState::Paused => "⏸ Paused",
             PlaybackState::Stopped => "⏹ Stopped",
         };
-        let vol_pct = (self.state.volume * 100.0) as u8;
-        let format_info = if self.state.sample_rate > 0 {
+        let vol_pct = (self.state.volume * 100.0).round() as u8;
+
+        // Volume bar: 10 blocks, colored from green→yellow→red as level increases.
+        let vol_blocks = 10;
+        let filled_blocks = ((self.state.volume * vol_blocks as f32).round() as usize).min(vol_blocks);
+        let mut vol_spans: Vec<Span> = Vec::with_capacity(vol_blocks + 4);
+        vol_spans.push(Span::styled("  │  Vol: ", Style::default().fg(Color::DarkGray)));
+        for i in 0..vol_blocks {
+            let block_color = match i {
+                0..=5 => Color::Green,
+                6..=7 => Color::Yellow,
+                _ => Color::Red,
+            };
+            if i < filled_blocks {
+                vol_spans.push(Span::styled("█", Style::default().fg(block_color)));
+            } else {
+                vol_spans.push(Span::styled("░", Style::default().fg(Color::DarkGray)));
+            }
+        }
+        vol_spans.push(Span::styled(format!(" {}%", vol_pct), Style::default().fg(Color::DarkGray)));
+
+        let format_suffix = if self.state.sample_rate > 0 {
             format!(
-                "│  Vol: {}%  │  {}Hz {}ch",
-                vol_pct, self.state.sample_rate, self.state.channels
+                "  │  {}Hz {}ch",
+                self.state.sample_rate, self.state.channels
             )
         } else {
-            format!("│  Vol: {}%", vol_pct)
+            String::new()
         };
-        Paragraph::new(Line::from(vec![
+        vol_spans.push(Span::styled(format_suffix, Style::default().fg(Color::DarkGray)));
+
+        let mut spans = vec![
             Span::styled(status_icon, Style::default().fg(Color::Green)),
-            Span::styled(format!("  {format_info}"), Style::default().fg(Color::DarkGray)),
-        ]))
-        .centered()
-        .render(chunks[4], buf);
+        ];
+        spans.extend(vol_spans);
+        Paragraph::new(Line::from(spans))
+            .centered()
+            .render(chunks[4], buf);
 
         // --- Seek / progress bar ---
         ProgressBar::default()
@@ -233,10 +249,15 @@ impl<'a> Widget for PlayingTab<'a> {
             .total(self.state.duration)
             .render(chunks[5], buf);
 
-        // --- Spectrum visualizer (capped at 50 rows) ---
+        // --- Spectrum visualizer (80% width centered, capped at 50 rows) ---
         if !self.state.spectrum.is_empty() {
             let viz_area = chunks[7];
+            let viz_inner_w = ((viz_area.width as f64) * 0.8) as u16;
+            let viz_inner_w = viz_inner_w.max(20);
+            let viz_x_off = (viz_area.width.saturating_sub(viz_inner_w)) / 2;
             let capped = Rect {
+                x: viz_area.x + viz_x_off,
+                width: viz_inner_w,
                 height: viz_area.height.min(50),
                 ..viz_area
             };
@@ -294,5 +315,43 @@ impl<'a> Widget for PlayingTab<'a> {
             }
         }
     }
+}
+
+/// Compute album art display rows — shared between render and mouse-rect code.
+/// Fixed items below art: title(1) + artist(1) + album(1) + controls(1) + seek(1)
+/// + spacer(1) + min visualizer(4) + spacer(1) = 11 rows minimum.
+pub fn compute_art_rows(has_art: bool, source_rows: usize, area_height: u16) -> u16 {
+    let max_art_rows = area_height.saturating_sub(11) as usize;
+    if has_art && max_art_rows >= 4 && source_rows > 0 {
+        source_rows.min(max_art_rows).min(18) as u16
+    } else {
+        0
+    }
+}
+
+/// Compute the centered album art x-range for mouse hit-testing.
+pub fn compute_art_rect(
+    has_art: bool,
+    art_source_rows: usize,
+    art_source_cols: usize,
+    content_x: u16,
+    content_y: u16,
+    content_width: u16,
+    art_rows: u16,
+) -> Option<ratatui::layout::Rect> {
+    if !has_art || art_rows == 0 || art_source_rows == 0 {
+        return None;
+    }
+    let display_rows = art_rows as usize;
+    let scale = display_rows as f32 / art_source_rows as f32;
+    let display_cols = ((art_source_cols as f32) * scale).round() as usize;
+    let display_cols = display_cols.min(content_width as usize);
+    let art_x = content_x + (content_width.saturating_sub(display_cols as u16)) / 2;
+    Some(ratatui::layout::Rect {
+        x: art_x,
+        y: content_y,
+        width: display_cols as u16,
+        height: art_rows,
+    })
 }
 
