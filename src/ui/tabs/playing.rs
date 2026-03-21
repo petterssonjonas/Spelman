@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use crate::playlist::queue::Queue;
 use crate::ui::albumart::AlbumArt;
-use crate::ui::widgets::progress_bar::ProgressBar;
-use crate::ui::widgets::visualizer::Visualizer;
+use crate::ui::widgets::progress_bar::{ProgressBar, bar_geometry};
+use crate::ui::widgets::visualizer::{BarStyle, Oscilloscope, VizMode, Visualizer};
+use crate::ui::widgets::waveform::{Waveform, WaveformData, WaveformMode, WaveformOscilloscope};
 
 /// Playback state — replaces ambiguous `is_playing: bool` + `file_path: Option`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,15 +61,12 @@ impl Default for PlayingState {
 }
 
 impl PlayingState {
-    /// Smooth incoming spectrum data with exponential moving average.
+    /// Store raw spectrum data (smoothing is handled by VisualizerState).
     pub fn update_spectrum(&mut self, raw: &[f32]) {
         if self.spectrum.len() != raw.len() {
             self.spectrum = raw.to_vec();
-            return;
-        }
-        let smoothing = 0.35;
-        for (s, &r) in self.spectrum.iter_mut().zip(raw.iter()) {
-            *s = *s * smoothing + r * (1.0 - smoothing);
+        } else {
+            self.spectrum.copy_from_slice(raw);
         }
     }
 }
@@ -77,6 +75,26 @@ pub struct PlayingTab<'a> {
     pub state: &'a PlayingState,
     pub queue: &'a Queue,
     pub album_art: &'a AlbumArt,
+    pub waveform: Option<&'a WaveformData>,
+    pub seekbar_width: f64,
+    /// Pre-processed spectrum (through Cava-style smoothing).
+    pub processed_spectrum: &'a [f32],
+    /// Bar rendering style.
+    pub bar_style: BarStyle,
+    /// Number of viz bars to render (12–64).
+    pub viz_bars: usize,
+    /// Gap in columns between bars (0 = joined).
+    pub viz_gap: usize,
+    /// Show Hz frequency labels below the viz (debug).
+    pub show_hz_labels: bool,
+    /// Visualizer display mode (Bars or Oscilloscope).
+    pub viz_mode: VizMode,
+    /// Waveform display mode (Classic or Oscilloscope).
+    pub waveform_mode: WaveformMode,
+    /// Maximum album art rows (reduced when EQ needs space).
+    pub max_art_rows: Option<u16>,
+    /// When true, skip half-block art rendering (image protocol handles it).
+    pub use_image_protocol: bool,
 }
 
 impl<'a> Widget for PlayingTab<'a> {
@@ -99,26 +117,33 @@ impl<'a> Widget for PlayingTab<'a> {
         // Compute album art display size.
         let art_source_rows = self.album_art.cells.len();
         let art_source_cols = self.album_art.cells.first().map_or(0, |r| r.len());
-        let art_rows = compute_art_rows(self.album_art.has_art, art_source_rows, area.height);
+        let mut art_rows = compute_art_rows(self.album_art.has_art, art_source_rows, area.height);
+        // Respect max_art_rows override (e.g., when EQ needs space).
+        if let Some(max) = self.max_art_rows {
+            art_rows = art_rows.min(max);
+        }
+
+        // Waveform rows below the seek bar.
+        let has_waveform = self.waveform.is_some();
+        let wave_rows: u16 = if has_waveform { 3 } else { 0 };
 
         // Layout top-to-bottom:
-        //   album art | track info (3 lines) | controls (1) | seek bar (1) | spacer | visualizer | spacer | queue
+        //   album art | title | artist | album | controls | seek bar | waveform | visualizer | tail
         let chunks = Layout::vertical([
-            Constraint::Length(art_rows),  // album art
-            Constraint::Length(1),         // title
-            Constraint::Length(1),         // artist
-            Constraint::Length(1),         // album
-            Constraint::Length(1),         // controls: play/pause + volume + format
-            Constraint::Length(1),         // seek / progress bar
-            Constraint::Length(1),         // spacer
-            Constraint::Min(4),           // visualizer (fills remaining, capped below)
-            Constraint::Length(1),         // spacer
-            Constraint::Min(0),           // queue
+            Constraint::Length(art_rows),   // 0: album art
+            Constraint::Length(1),          // 1: title
+            Constraint::Length(1),          // 2: artist
+            Constraint::Length(1),          // 3: album
+            Constraint::Length(1),          // 4: controls
+            Constraint::Length(1),          // 5: seek / progress bar
+            Constraint::Length(wave_rows),  // 6: waveform (braille, below seek bar)
+            Constraint::Min(0),            // 7: visualizer (fills remaining, capped to 6 rows)
         ])
         .split(area);
 
         // --- Album art (top, centered, scaled to fit) ---
-        if art_rows > 0 {
+        // Skip half-block rendering when image protocol will overlay real image.
+        if art_rows > 0 && !self.use_image_protocol {
             let display_rows = art_rows as usize;
             // Scale the art width proportionally to the height.
             let scale = display_rows as f32 / art_source_rows as f32;
@@ -247,81 +272,198 @@ impl<'a> Widget for PlayingTab<'a> {
         ProgressBar::default()
             .elapsed(self.state.elapsed)
             .total(self.state.duration)
+            .width_fraction(self.seekbar_width)
             .render(chunks[5], buf);
 
-        // --- Spectrum visualizer (80% width centered, capped at 50 rows) ---
-        if !self.state.spectrum.is_empty() {
-            let viz_area = chunks[7];
-            let viz_inner_w = ((viz_area.width as f64) * 0.8) as u16;
-            let viz_inner_w = viz_inner_w.max(20);
-            let viz_x_off = (viz_area.width.saturating_sub(viz_inner_w)) / 2;
-            let capped = Rect {
-                x: viz_area.x + viz_x_off,
-                width: viz_inner_w,
-                height: viz_area.height.min(50),
-                ..viz_area
+        // --- Waveform (braille dots below seek bar, aligned to bar-only region) ---
+        if let Some(waveform) = self.waveform {
+            let fraction = if self.state.duration.as_secs_f64() > 0.0 {
+                (self.state.elapsed.as_secs_f64() / self.state.duration.as_secs_f64()).clamp(0.0, 1.0)
+            } else {
+                0.0
             };
-            Visualizer {
-                spectrum: &self.state.spectrum,
-            }
-            .render(capped, buf);
-        }
 
-        // --- Queue display ---
-        if !self.queue.is_empty() && chunks[9].height >= 2 {
-            let queue_area = chunks[9];
-            let queue_header = Line::from(Span::styled(
-                format!(" Queue ({} tracks) ", self.queue.len()),
-                Style::default().fg(Color::DarkGray),
-            ));
-            buf.set_line(queue_area.x, queue_area.y, &queue_header, queue_area.width);
-
-            let current_idx = self.queue.current_index();
-            let tracks = self.queue.tracks();
-            let max_rows = (queue_area.height as usize).saturating_sub(1);
-
-            let start = current_idx
-                .map(|i| i.saturating_sub(max_rows / 2))
-                .unwrap_or(0);
-
-            for (row, idx) in (start..tracks.len()).enumerate() {
-                if row >= max_rows {
-                    break;
-                }
-                let path = &tracks[idx];
-                let name = path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "?".into());
-
-                let is_current = current_idx == Some(idx);
-                let prefix = if is_current { "▶ " } else { "  " };
-                let style = if is_current {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
+            // Align waveform to the exact bar region (excluding time labels).
+            if let Some((bar_x, bar_w)) = bar_geometry(chunks[5], self.state.elapsed, self.state.duration, self.seekbar_width) {
+                let waveform_rect = Rect {
+                    x: bar_x,
+                    y: chunks[6].y,
+                    width: bar_w,
+                    height: wave_rows,
                 };
 
-                let line = Line::from(Span::styled(format!("{prefix}{name}"), style));
-                let y = queue_area.y + 1 + row as u16;
-                if y < queue_area.y + queue_area.height {
-                    buf.set_line(
-                        queue_area.x + 1,
-                        y,
-                        &line,
-                        queue_area.width.saturating_sub(2),
-                    );
+                match self.waveform_mode {
+                    WaveformMode::Classic => {
+                        Waveform {
+                            peaks: &waveform.peaks,
+                            fraction,
+                            bar_style: self.bar_style,
+                        }
+                        .render(waveform_rect, buf);
+                    }
+                    WaveformMode::Oscilloscope => {
+                        WaveformOscilloscope {
+                            peaks: &waveform.peaks,
+                            fraction,
+                            bar_style: self.bar_style,
+                        }
+                        .render(waveform_rect, buf);
+                    }
+                }
+            }
+        }
+
+        // --- Spectrum visualizer (aligned to seekbar, max 6 rows) ---
+        if !self.processed_spectrum.is_empty() {
+            let viz_area = chunks[7];
+            if viz_area.height > 0 {
+                // Align viz to the exact seekbar region (excluding time labels).
+                if let Some((bar_x, bar_w)) = bar_geometry(
+                    chunks[5],
+                    self.state.elapsed,
+                    self.state.duration,
+                    self.seekbar_width,
+                ) {
+                    let capped = Rect {
+                        x: bar_x,
+                        width: bar_w,
+                        height: viz_area.height.min(6),
+                        ..viz_area
+                    };
+                    match self.viz_mode {
+                        VizMode::Bars => {
+                            Visualizer {
+                                spectrum: self.processed_spectrum,
+                                bar_style: self.bar_style,
+                                viz_bars: self.viz_bars,
+                                viz_gap: self.viz_gap,
+                            }
+                            .render(capped, buf);
+                        }
+                        VizMode::Oscilloscope => {
+                            Oscilloscope {
+                                spectrum: self.processed_spectrum,
+                                viz_bars: self.viz_bars,
+                                viz_gap: self.viz_gap,
+                                bar_style: self.bar_style,
+                            }
+                            .render(capped, buf);
+                        }
+                    }
+
+                    // Hz frequency labels below the viz.
+                    if self.show_hz_labels {
+                        let label_y = capped.y + capped.height;
+                        if label_y < area.y + area.height {
+                            render_hz_labels(
+                                buf, bar_x, bar_w, label_y,
+                                self.viz_bars, self.viz_gap,
+                            );
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+/// Render adaptive Hz frequency labels aligned to the visualizer's bar layout.
+/// Uses "nice" frequencies (50, 100, 250, 500, 1k, 2k, 4k, 8k, 16k) placed
+/// on the same inner span as the drawn bars, with adaptive density based on
+/// available width and overlap avoidance.
+fn render_hz_labels(
+    buf: &mut Buffer,
+    x: u16,
+    width: u16,
+    y: u16,
+    viz_bars: usize,
+    viz_gap: usize,
+) {
+    use crate::ui::widgets::visualizer::BarLayout;
+
+    let layout = match BarLayout::compute(width, viz_bars, viz_gap) {
+        Some(l) => l,
+        None => return,
+    };
+
+    const MIN_FREQ: f64 = 50.0;
+    const MAX_FREQ: f64 = 16_000.0;
+    let log_ratio = (MAX_FREQ / MIN_FREQ).ln();
+
+    // Nice candidate frequencies.
+    const CANDIDATES: &[f64] = &[
+        50.0, 100.0, 200.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 8_000.0, 16_000.0,
+    ];
+
+    let style = Style::default().fg(Color::DarkGray);
+
+    // Inner span: the actual drawn bar region.
+    let inner_left = x + layout.left_pad as u16;
+    let inner_w = layout.actual_width as u16;
+    if inner_w < 8 {
+        return;
+    }
+
+    // Build labels with pixel positions, then drop overlapping ones.
+    struct Tick {
+        label: String,
+        cx: u16, // center x in absolute coords
+    }
+
+    let mut ticks: Vec<Tick> = Vec::new();
+    for &freq in CANDIDATES {
+        if freq < MIN_FREQ || freq > MAX_FREQ {
+            continue;
+        }
+        let frac = ((freq / MIN_FREQ).ln() / log_ratio).clamp(0.0, 1.0);
+        let px = inner_left as f64 + frac * (inner_w.saturating_sub(1)) as f64;
+
+        let label = format_freq(freq);
+        ticks.push(Tick { label, cx: px.round() as u16 });
+    }
+
+    // Place labels, skipping any that would overlap the previous one.
+    let right_edge = inner_left + inner_w;
+    let mut last_end: u16 = 0; // rightmost column used by previous label + 1
+    for tick in &ticks {
+        let half = tick.label.len() as u16 / 2;
+        let mut lx = tick.cx.saturating_sub(half);
+        // Clamp to inner bounds.
+        lx = lx.max(inner_left);
+        lx = lx.min(right_edge.saturating_sub(tick.label.len() as u16));
+        if lx < inner_left {
+            continue;
+        }
+        // Skip if it would overlap the previous label (need ≥1 col gap).
+        if last_end > 0 && lx < last_end + 1 {
+            continue;
+        }
+        if lx + tick.label.len() as u16 <= right_edge {
+            buf.set_string(lx, y, &tick.label, style);
+            last_end = lx + tick.label.len() as u16;
+        }
+    }
+}
+
+/// Format a frequency value concisely: "50", "500", "2k", "3.3k", "16k".
+fn format_freq(freq: f64) -> String {
+    if freq >= 1000.0 {
+        let k = freq / 1000.0;
+        if (k - k.round()).abs() < 0.05 {
+            format!("{}k", k.round() as u32)
+        } else {
+            format!("{:.1}k", k)
+        }
+    } else {
+        format!("{}", freq.round() as u32)
+    }
+}
+
 /// Compute album art display rows — shared between render and mouse-rect code.
-/// Fixed items below art: title(1) + artist(1) + album(1) + controls(1) + seek(1)
-/// + spacer(1) + min visualizer(4) + spacer(1) = 11 rows minimum.
+/// Fixed items below art: title(1) + artist(1) + album(1) + controls(1)
+/// + seek(1) + waveform(3) + visualizer(1) = 9 rows minimum.
 pub fn compute_art_rows(has_art: bool, source_rows: usize, area_height: u16) -> u16 {
-    let max_art_rows = area_height.saturating_sub(11) as usize;
+    let max_art_rows = area_height.saturating_sub(9) as usize;
     if has_art && max_art_rows >= 4 && source_rows > 0 {
         source_rows.min(max_art_rows).min(18) as u16
     } else {

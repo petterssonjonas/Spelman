@@ -1,7 +1,7 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::HostTrait;
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -87,23 +87,37 @@ fn engine_thread(cmd_rx: Receiver<AudioCommand>, event_tx: Sender<AudioEvent>) {
     let is_paused = Arc::new(AtomicBool::new(false));
     let mut last_pos_samples: u64 = 0;
     let mut current_volume: f32 = 0.5;
+    let volume_atomic = Arc::new(AtomicU32::new(f32::to_bits(current_volume)));
+
+    let mut first_spectrum_logged = false;
+    let mut playback_start: Option<Instant> = None;
+    // Pending buffer: decoded+DSP'd samples that didn't fit in the ring.
+    // Never discard decoded audio — buffer the excess until ring has room.
+    let mut pending: Vec<f32> = Vec::new();
+    let mut pending_pos: usize = 0;
 
     loop {
         // ── Idle: block on the next command ──────────────────────────────
         if matches!(state, EngineState::Idle) {
             last_pos_samples = 0;
+            first_spectrum_logged = false;
+            pending.clear();
+            pending_pos = 0;
             match cmd_rx.recv() {
                 Ok(AudioCommand::Play(path)) => {
+                    playback_start = Some(Instant::now());
                     state = bridge::start_playback(
                         &path,
                         &device,
                         &event_tx,
                         &is_paused,
                         current_volume,
+                        &volume_atomic,
                     );
                 }
                 Ok(AudioCommand::SetVolume(v)) => {
                     current_volume = v;
+                    volume_atomic.store(f32::to_bits(v), Ordering::Relaxed);
                 }
                 Ok(_) => {}
                 Err(_) => return,
@@ -122,6 +136,8 @@ fn engine_thread(cmd_rx: Receiver<AudioCommand>, event_tx: Sender<AudioEvent>) {
             samples_played,
             sample_rate,
             channels,
+            spec_consumer,
+            analyser,
             ..
         } = &mut state
         {
@@ -130,12 +146,16 @@ fn engine_thread(cmd_rx: Receiver<AudioCommand>, event_tx: Sender<AudioEvent>) {
                     AudioCommand::Play(path) => {
                         stop_flag.store(true, Ordering::Release);
                         last_pos_samples = 0;
+                        pending.clear();
+                        pending_pos = 0;
+                        playback_start = Some(Instant::now());
                         new_state = Some(bridge::start_playback(
                             &path,
                             &device,
                             &event_tx,
                             &is_paused,
                             current_volume,
+                            &volume_atomic,
                         ));
                         break;
                     }
@@ -159,6 +179,8 @@ fn engine_thread(cmd_rx: Receiver<AudioCommand>, event_tx: Sender<AudioEvent>) {
                     AudioCommand::Stop => {
                         stop_flag.store(true, Ordering::Release);
                         let _ = event_tx.send(AudioEvent::Stopped);
+                        pending.clear();
+                        pending_pos = 0;
                         new_state = Some(EngineState::Idle);
                         break;
                     }
@@ -175,17 +197,34 @@ fn engine_thread(cmd_rx: Receiver<AudioCommand>, event_tx: Sender<AudioEvent>) {
                             samples_played
                                 .store(new_pos_samples, Ordering::Release);
                             last_pos_samples = new_pos_samples;
+                            // Flush spectrum pipeline so stale pre-seek
+                            // data doesn't bleed into post-seek display.
+                            let stale = spec_consumer.slots();
+                            if stale > 0 {
+                                if let Ok(chunk) =
+                                    spec_consumer.read_chunk(stale)
+                                {
+                                    chunk.commit_all();
+                                }
+                            }
+                            analyser.reset();
                         }
                     }
                     AudioCommand::SetVolume(v) => {
                         current_volume = v;
-                        dsp.volume.set_volume(v);
+                        volume_atomic.store(
+                            f32::to_bits(v),
+                            Ordering::Relaxed,
+                        );
                     }
                     AudioCommand::SetEq(gains) => {
                         dsp.eq.set_all_gains(gains);
                     }
                     AudioCommand::ToggleEq => {
                         dsp.eq.set_enabled(!dsp.eq.enabled());
+                    }
+                    AudioCommand::SetReplayGain(gain) => {
+                        dsp.set_replay_gain(gain);
                     }
                 }
             }
@@ -196,7 +235,7 @@ fn engine_thread(cmd_rx: Receiver<AudioCommand>, event_tx: Sender<AudioEvent>) {
             continue;
         }
 
-        // ── Decode → DSP → ring buffer ──────────────────────────────────
+        // ── Spectrum analysis (from output side) + Decode → DSP → ring ──
         if let EngineState::Playing {
             producer,
             decoder,
@@ -204,36 +243,109 @@ fn engine_thread(cmd_rx: Receiver<AudioCommand>, event_tx: Sender<AudioEvent>) {
             samples_played,
             channels,
             sample_rate,
+            spec_consumer,
+            analyser,
             ..
         } = &mut state
         {
-            if producer.slots() > 4096 {
+            // Drain spectrum ring — cap per iteration to avoid starving decode.
+            let spec_avail = spec_consumer.slots().min(16384);
+            if spec_avail > 0 {
+                if let Ok(chunk) = spec_consumer.read_chunk(spec_avail) {
+                    let emitted = {
+                        let (first, second) = chunk.as_slices();
+                        let mut flag = false;
+                        if let Some(bars) =
+                            analyser.push_and_compute(
+                                first,
+                                *channels as usize,
+                            )
+                        {
+                            let _ =
+                                event_tx.send(AudioEvent::Spectrum(*bars));
+                            flag = true;
+                        }
+                        if !second.is_empty() {
+                            if let Some(bars) = analyser.push_and_compute(
+                                second,
+                                *channels as usize,
+                            ) {
+                                let _ = event_tx
+                                    .send(AudioEvent::Spectrum(*bars));
+                                flag = true;
+                            }
+                        }
+                        flag
+                    };
+                    chunk.commit_all();
+                    if emitted && !first_spectrum_logged {
+                        first_spectrum_logged = true;
+                        let elapsed_ms = playback_start
+                            .map(|t| t.elapsed().as_millis())
+                            .unwrap_or(0);
+                        tracing::info!(
+                            "first spectrum event ({} samples, {}ms from play)",
+                            spec_avail,
+                            elapsed_ms,
+                        );
+                    }
+                }
+            }
+
+            // Drain pending (leftover from a decode that didn't fit).
+            if !pending.is_empty() {
+                let slots = producer.slots();
+                let remaining = pending.len() - pending_pos;
+                let to_push = remaining.min(slots);
+                if to_push > 0 {
+                    for &s in &pending[pending_pos..pending_pos + to_push]
+                    {
+                        let _ = producer.push(s);
+                    }
+                    pending_pos += to_push;
+                    if pending_pos >= pending.len() {
+                        pending.clear();
+                        pending_pos = 0;
+                    }
+                } else {
+                    thread::sleep(Duration::from_millis(2));
+                }
+            } else if producer.slots() > 4096 {
+                // Decode new samples only when pending is empty.
                 match decoder.next_samples() {
                     Ok(Some(mut samples)) => {
-                        // Run the full DSP chain (volume, RMS, spectrum).
                         dsp.process(&mut samples, &event_tx);
 
-                        // Push processed samples into the SPSC ring buffer.
-                        let to_push = samples.len().min(producer.slots());
+                        let avail = producer.slots();
+                        let to_push = samples.len().min(avail);
                         for &s in &samples[..to_push] {
                             let _ = producer.push(s);
                         }
+                        // Save leftover — never discard decoded samples.
+                        if to_push < samples.len() {
+                            pending = samples;
+                            pending_pos = to_push;
+                        }
 
                         // Throttle Position events: ~10 Hz.
-                        let played = samples_played.load(Ordering::Relaxed);
+                        let played =
+                            samples_played.load(Ordering::Relaxed);
                         let threshold =
                             (*sample_rate as u64 * *channels as u64) / 10;
-                        if played.saturating_sub(last_pos_samples) >= threshold {
+                        if played.saturating_sub(last_pos_samples)
+                            >= threshold
+                        {
                             last_pos_samples = played;
                             let frames = played / *channels as u64;
                             let pos = Duration::from_secs_f64(
                                 frames as f64 / *sample_rate as f64,
                             );
-                            let _ = event_tx.send(AudioEvent::Position(pos));
+                            let _ =
+                                event_tx.send(AudioEvent::Position(pos));
                         }
                     }
                     Ok(None) => {
-                        // Track finished — wait for ring buffer to drain.
+                        let _ = event_tx.send(AudioEvent::TrackEnding);
                         drain_and_finish(
                             &mut state,
                             &cmd_rx,
@@ -242,6 +354,7 @@ fn engine_thread(cmd_rx: Receiver<AudioCommand>, event_tx: Sender<AudioEvent>) {
                             &is_paused,
                             &mut last_pos_samples,
                             current_volume,
+                            &volume_atomic,
                         );
                     }
                     Err(e) => {
@@ -272,6 +385,7 @@ fn drain_and_finish(
     is_paused: &Arc<AtomicBool>,
     last_pos_samples: &mut u64,
     current_volume: f32,
+    volume_atomic: &Arc<AtomicU32>,
 ) {
     if let EngineState::Playing {
         producer,
@@ -305,6 +419,7 @@ fn drain_and_finish(
                             event_tx,
                             is_paused,
                             current_volume,
+                            volume_atomic,
                         );
                         return;
                     }

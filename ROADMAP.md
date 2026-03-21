@@ -4,25 +4,9 @@ Ideas for features and improvements. Remove items as they are implemented.
 
 ## Audio
 
-- **Gapless playback** — pre-decode the next track's first samples while the current one drains, so there's no silence gap between tracks. The rtrb + drain_and_finish architecture is already set up for this. - Toggle on or off in settings.
-
-- **Audio normalization (ReplayGain)** — read ReplayGain tags from metadata and apply per-track gain adjustment in the DSP chain, so tracks from different albums play at consistent volume. - Toggle on or off in settings.
-
 - **Crossfade** — fade out the last N seconds of a track while fading in the next one. Needs a second decoder running in parallel, mixing into the ring buffer. - Toggle on or off in settings.
 
 ## UI / Visual
-
-- **Volume bar blocks** — replace the volume indicator with blocks that increase in size and color intensity as volume increases. - The percentage shows at the end too. 
-
-- **Clickable playback controls** — make the Play/Pause icon and the "Playing" tab label mouse-clickable to toggle playback. The album art should be clickable to play/pause as well.
-
-- **Better track metadata display** — show artist, album, and song title as separate styled lines on the Playing tab, reading from file metadata. These lines should have shimmer. 
-
-- Shimmer effect toggle in settings, as well as shimmer intensity and speed.
-
-- **Narrower seek bar** — make the seek bar (with current time and total time) 80% of the terminal width instead of full width. Also thicker bar.
-
-- **Waveform overview** — pre-scan the track to generate a full waveform thumbnail, render it behind the seek bar so you can visually see where the loud/quiet parts are. 
 
 - **Lyrics display** — parse embedded lyrics from tags (USLT/SYLT) or .lrc sidecar files, display synced lyrics on the Playing tab scrolling in time with playback. Can be toggled on of off and replace album art.
 
@@ -30,11 +14,7 @@ Ideas for features and improvements. Remove items as they are implemented.
 
 - **Chroma visualizer overlay** — integrate [chroma](https://github.com/Shahid-Shabbir/chroma) as a toggleable visual overlay (default keybind: `C`). Renders chromatic/color effects over the app UI while music plays.
 
-- **Clickable "Keybindings reference" link** — make the "Keybindings reference: K" text on the Home tab mouse-clickable to open the keybindings popup. 
-
-- **Glimmer/shimmer effect on seek bar** — extend the traveling brightness wave to also shimmer across the seek bar in addition to song/artist/album text.
-
-- Debug the album art and its interaction with the mouse. there seems to be something behind it, or in it that the mouse selects.
+- **iTerm2 / Kitty image protocol for album art** — use iTerm2 inline image protocol and Kitty graphics protocol to render true-color album art in supported terminals, instead of half-block approximation. Auto-detect terminal support and fall back to current method.
 
 ## System Integration
 
@@ -64,4 +44,31 @@ Ideas for features and improvements. Remove items as they are implemented.
 
 - Spelman should be able to hang in the background as a service, and Vindharpa, or scripts can control it. Spelman --service perhaps.
 
+## Streaming services integration
+
+- Spotify - realistically only for 5 users.
+
+- Youtube Music - with python api, but can be turned off at any time.
+
+- Archive.org - free open api. Live shows, historical, niche mostly.
+
+- Audiobooks - public domain books on archive.org. 
+
+- Audius - The web3 alternative, decentralized, free, open no rate limits.
+mostly independent electronic, hiphop, indie.
+
+- Jamendo - public api, REST. Free for non commercial.
+
+- Radio-Browser, global live radio. Free open api.
+
+- Freesound - More lo-fi, ambient or soundscapes. Massive database. Have to attribute creators - good feature to build in. Very interesting.
+
+- Unified Music APis like musicapi.com or odesli. One Api for spotify, tidal, deezer and audius. Generallt montly sub if more than a few users.
+
+- freemusicarchive.org
+royalty free muscic
+
+## UI
+
+Separate AI looking into integrating openstretmap tui world map for radio-browser.
 

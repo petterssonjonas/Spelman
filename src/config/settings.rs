@@ -410,7 +410,48 @@ pub struct Settings {
     pub theme_colors: ThemeColors,
     #[serde(default)]
     pub keybindings: KeyBindings,
+    #[serde(default = "default_true")]
+    pub shimmer_enabled: bool,
+    #[serde(default = "default_one")]
+    pub shimmer_intensity: f32,
+    #[serde(default = "default_one")]
+    pub shimmer_speed: f32,
+    #[serde(default)]
+    pub waveform_enabled: bool,
+    #[serde(default)]
+    pub waveform_mode: crate::ui::widgets::waveform::WaveformMode,
+    #[serde(default = "default_seekbar_width")]
+    pub seekbar_width: f32,
+    #[serde(default)]
+    pub viz_mode: crate::ui::widgets::visualizer::VizMode,
+    #[serde(default)]
+    pub visualizer_bar_style: crate::ui::widgets::visualizer::BarStyle,
+    #[serde(default = "default_viz_bars")]
+    pub viz_bars: usize,
+    #[serde(default = "default_viz_gap")]
+    pub viz_gap: usize,
+    #[serde(default)]
+    pub show_hz_labels: bool,
+    #[serde(default = "default_true")]
+    pub gapless: bool,
+    #[serde(default = "default_true")]
+    pub replay_gain: bool,
+    #[serde(default)]
+    pub custom_eq_presets: Vec<CustomEqPreset>,
 }
+
+/// A user-saved EQ preset, serializable to TOML.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CustomEqPreset {
+    pub name: String,
+    pub gains: [f32; 10],
+}
+
+fn default_true() -> bool { true }
+fn default_one() -> f32 { 1.0 }
+fn default_seekbar_width() -> f32 { 0.85 }
+fn default_viz_bars() -> usize { 32 }
+fn default_viz_gap() -> usize { 1 }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -426,6 +467,20 @@ impl Default for Settings {
             theme: "default".into(),
             theme_colors: ThemeColors::default(),
             keybindings: KeyBindings::default(),
+            shimmer_enabled: true,
+            shimmer_intensity: 1.0,
+            shimmer_speed: 1.0,
+            waveform_enabled: false,
+            waveform_mode: crate::ui::widgets::waveform::WaveformMode::default(),
+            seekbar_width: 0.85,
+            viz_mode: crate::ui::widgets::visualizer::VizMode::default(),
+            visualizer_bar_style: crate::ui::widgets::visualizer::BarStyle::default(),
+            viz_bars: 32,
+            viz_gap: 1,
+            show_hz_labels: false,
+            gapless: true,
+            replay_gain: true,
+            custom_eq_presets: Vec::new(),
         }
     }
 }

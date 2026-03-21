@@ -9,6 +9,7 @@ use crate::config::settings::Settings;
 use crate::playlist::queue::Queue;
 use crate::ui::albumart::{self, AlbumArt, ArtCell};
 use crate::ui::tabs::playing::{PlaybackState, PlayingState};
+use crate::ui::widgets::waveform::WaveformState;
 use crate::util::channels::{AudioCommand, AudioEvent};
 
 /// Result of background metadata + album art loading.
@@ -18,6 +19,10 @@ struct TrackMeta {
     artist: String,
     album: String,
     art_cells: Option<Vec<Vec<ArtCell>>>,
+    /// Raw image bytes for image protocol rendering (Kitty/iTerm2).
+    raw_image: Option<Vec<u8>>,
+    /// ReplayGain linear multiplier (None if no tag found).
+    replay_gain: Option<f32>,
 }
 
 /// Coordinates all playback concerns: engine, queue, playing state,
@@ -27,6 +32,7 @@ pub struct PlayerCoordinator {
     pub playing: PlayingState,
     pub queue: Queue,
     pub album_art: AlbumArt,
+    pub waveform: WaveformState,
     meta_rx: Option<crossbeam_channel::Receiver<TrackMeta>>,
     /// Cancellation flag for the previous metadata loader thread.
     meta_cancel: Arc<AtomicBool>,
@@ -43,6 +49,7 @@ impl PlayerCoordinator {
             playing,
             queue: Queue::new(),
             album_art: AlbumArt::default(),
+            waveform: WaveformState::default(),
             meta_rx: None,
             meta_cancel: Arc::new(AtomicBool::new(false)),
         }
@@ -155,6 +162,16 @@ impl PlayerCoordinator {
         self.engine.shutdown();
     }
 
+    /// Whether ReplayGain is enabled (cached from settings on last meta event).
+    fn apply_replay_gain(&self, gain: Option<f32>, enabled: bool) {
+        if enabled {
+            let linear = gain.unwrap_or(1.0);
+            self.engine.send(AudioCommand::SetReplayGain(linear));
+        } else {
+            self.engine.send(AudioCommand::SetReplayGain(1.0));
+        }
+    }
+
     /// Poll the engine for audio events and update state.
     /// Returns true if a track finished (caller may want to auto-advance).
     pub fn process_events(&mut self, settings: &Settings) {
@@ -173,6 +190,11 @@ impl PlayerCoordinator {
                     self.playing.elapsed = Duration::ZERO;
                     self.playing.file_path = Some(path.clone());
                     self.load_metadata_async(&path);
+                    // Clear old waveform and start background scan if enabled.
+                    self.waveform.clear();
+                    if settings.waveform_enabled {
+                        self.waveform.scan(&path);
+                    }
                 }
                 AudioEvent::Position(pos) => {
                     self.playing.elapsed = pos;
@@ -186,11 +208,21 @@ impl PlayerCoordinator {
                 AudioEvent::Stopped => {
                     self.playing.playback = PlaybackState::Stopped;
                     self.playing.spectrum.clear();
+                    self.waveform.clear();
+                }
+                AudioEvent::TrackEnding => {
+                    // Gapless: immediately queue next track while current drains.
+                    if settings.gapless {
+                        self.play_next(settings);
+                    }
                 }
                 AudioEvent::Finished => {
                     self.playing.playback = PlaybackState::Stopped;
                     self.playing.spectrum.clear();
-                    self.play_next(settings);
+                    // If gapless was on, play_next was already called on TrackEnding.
+                    if !settings.gapless {
+                        self.play_next(settings);
+                    }
                 }
                 AudioEvent::Error(msg) => {
                     let path_str = self.playing.file_path
@@ -210,7 +242,7 @@ impl PlayerCoordinator {
     }
 
     /// Poll the background metadata + album art loader.
-    pub fn process_meta_events(&mut self) {
+    pub fn process_meta_events(&mut self, settings: &Settings) {
         let rx = match self.meta_rx.take() {
             Some(rx) => rx,
             None => return,
@@ -224,14 +256,22 @@ impl PlayerCoordinator {
                     self.playing.artist = meta.artist;
                     self.playing.album = meta.album;
 
+                    // Apply ReplayGain if tag was found.
+                    self.apply_replay_gain(meta.replay_gain, settings.replay_gain);
+                    if let Some(rg) = meta.replay_gain {
+                        tracing::info!("ReplayGain: {:.2}x linear for {:?}", rg, meta.path.file_name().unwrap_or_default());
+                    }
+
                     if let Some(cells) = meta.art_cells {
                         self.album_art.track_path = Some(meta.path);
                         self.album_art.cells = cells;
                         self.album_art.has_art = true;
+                        self.album_art.raw_image = meta.raw_image;
                     } else {
                         self.album_art.track_path = Some(meta.path);
                         self.album_art.cells.clear();
                         self.album_art.has_art = false;
+                        self.album_art.raw_image = None;
                     }
                 }
             }
@@ -268,6 +308,8 @@ impl PlayerCoordinator {
                     artist: String::new(),
                     album: String::new(),
                     art_cells: None,
+                    raw_image: None,
+                    replay_gain: None,
                 };
 
                 // Open the file once for both metadata and album art.
@@ -282,6 +324,9 @@ impl PlayerCoordinator {
                             meta.artist = tag.artist().map(|s| s.to_string()).unwrap_or_default();
                             meta.album = tag.album().map(|s| s.to_string()).unwrap_or_default();
 
+                            // Parse ReplayGain from tag items.
+                            meta.replay_gain = parse_replay_gain(tag);
+
                             // Check cancellation before expensive image decode.
                             if cancel.load(Ordering::Acquire) { return; }
 
@@ -293,6 +338,8 @@ impl PlayerCoordinator {
                                 .find(|p| p.pic_type() == PictureType::CoverFront)
                                 .or_else(|| tag.pictures().first());
                             if let Some(pic) = picture {
+                                // Store raw bytes for image protocol rendering.
+                                meta.raw_image = Some(pic.data().to_vec());
                                 if let Some(img) = albumart::load_image(pic.data()) {
                                     meta.art_cells = Some(albumart::render_art(&img, 30, 15));
                                 }
@@ -308,4 +355,42 @@ impl PlayerCoordinator {
             })
             .expect("Failed to spawn metadata loader thread");
     }
+}
+
+/// Parse ReplayGain track gain from a lofty Tag.
+/// Looks for common ReplayGain tag keys across formats.
+/// Returns a linear gain multiplier (e.g. -6.5 dB → 0.473).
+fn parse_replay_gain(tag: &lofty::tag::Tag) -> Option<f32> {
+    use lofty::tag::ItemKey;
+
+    // Known keys for ReplayGain track gain across formats.
+    let known_keys = [
+        ItemKey::ReplayGainTrackGain,
+        ItemKey::ReplayGainAlbumGain,
+    ];
+
+    for key in &known_keys {
+        if let Some(item) = tag.get(key) {
+            if let Some(val) = item.value().text() {
+                if let Some(db) = parse_gain_db(val) {
+                    let linear = 10.0_f32.powf(db / 20.0);
+                    return Some(linear);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse a gain string like "-6.5 dB" or "+3.2 dB" to f32 dB value.
+fn parse_gain_db(s: &str) -> Option<f32> {
+    let s = s.trim();
+    // Strip trailing "dB" (case-insensitive).
+    let num_part = if s.to_lowercase().ends_with("db") {
+        s[..s.len() - 2].trim()
+    } else {
+        s
+    };
+    num_part.parse::<f32>().ok()
 }

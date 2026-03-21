@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Terminal;
 
-use crate::config::settings::{BindableAction, Settings, key_to_string};
+use crate::config::settings::{BindableAction, CustomEqPreset, Settings, key_to_string};
 use crate::coordinator::player::PlayerCoordinator;
 use crate::library::scanner::{self, ScanEvent};
 use crate::playlist::playlist::{Playlist, PlaylistManager};
@@ -28,6 +28,8 @@ use crate::ui::tabs::pomodoro::PomodoroTab;
 use crate::ui::tabs::search::{SearchState, SearchTab};
 use crate::ui::tabs::settings::{SettingsState, SettingsTab};
 use crate::ui::widgets::eq::{EqState, render_eq};
+use crate::ui::widgets::shimmer::Shimmer;
+use crate::ui::widgets::visualizer::VisualizerState;
 use crate::util::channels::AudioCommand;
 use crossterm::event::KeyCode;
 use std::collections::HashMap;
@@ -91,10 +93,10 @@ pub struct App {
     recent_popup_selected: usize,
     /// Reverse lookup: KeyCode → BindableAction, built from settings.
     key_lookup: HashMap<KeyCode, BindableAction>,
-    /// Glimmer effect: when the last wave completed (or app start).
-    glimmer_last: Instant,
-    /// Glimmer effect: when the current wave started, or None if idle.
-    glimmer_wave: Option<Instant>,
+    /// Reusable shimmer effect for traveling brightness waves.
+    shimmer: Shimmer,
+    /// Cava-style visualizer smoothing/gravity state.
+    visualizer_state: VisualizerState,
     /// True when focus is on the tab bar (left/right switch tabs, content not selected).
     focus_tabbar: bool,
     /// Keybindings hint rect at bottom of Home tab (for mouse click).
@@ -115,6 +117,17 @@ pub struct App {
     active_playlist_popup_selected: usize,
     /// Close button [X] rect in tab bar.
     close_button_rect: Option<Rect>,
+    /// Album art rect for image protocol rendering (set during draw).
+    art_image_rect: Option<Rect>,
+    /// Detected image protocol (cached at startup).
+    image_protocol: crate::ui::imgproto::ImageProtocol,
+    /// Track path that last had an image rendered via protocol
+    /// (to avoid re-encoding every frame).
+    last_proto_art_path: Option<PathBuf>,
+    /// Cached PNG bytes for the current art at the current display size.
+    cached_proto_png: Option<Vec<u8>>,
+    /// Cached display size that the PNG was encoded for.
+    cached_proto_size: (u16, u16),
 }
 
 /// Where a new playlist's tracks come from.
@@ -132,6 +145,10 @@ impl App {
         playlists_state.reload();
         let key_lookup = settings.keybindings.build_lookup();
         let recent_tracks = Self::load_recent_tracks();
+        let mut eq_state = EqState::default();
+        eq_state.custom_presets = settings.custom_eq_presets.iter()
+            .map(|p| (p.name.clone(), p.gains))
+            .collect();
 
         Self {
             settings,
@@ -156,7 +173,7 @@ impl App {
             playlist_name_buf: String::new(),
             mouse_pos: (0, 0),
             key_lookup,
-            eq_state: EqState::default(),
+            eq_state,
             eq_rect: None,
             search_visible: false,
             pomodoro_visible: false,
@@ -166,8 +183,8 @@ impl App {
             playlist_picker_tracks: Vec::new(),
             recent_popup_visible: false,
             recent_popup_selected: 0,
-            glimmer_last: Instant::now(),
-            glimmer_wave: None,
+            shimmer: Shimmer::new(),
+            visualizer_state: VisualizerState::default(),
             focus_tabbar: true,
             keybindings_hint_rect: None,
             queue_popup_visible: false,
@@ -178,11 +195,100 @@ impl App {
             active_playlist_popup_visible: false,
             active_playlist_popup_selected: 0,
             close_button_rect: None,
+            art_image_rect: None,
+            image_protocol: {
+                let proto = crate::ui::imgproto::detect();
+                if proto != crate::ui::imgproto::ImageProtocol::None {
+                    tracing::info!("Image protocol detected: {:?}", proto);
+                }
+                proto
+            },
+            last_proto_art_path: None,
+            cached_proto_png: None,
+            cached_proto_size: (0, 0),
         }
     }
 
     pub fn play_file(&mut self, path: PathBuf) {
         self.player.play_file(path);
+    }
+
+    /// Render album art via Kitty or iTerm2 image protocol if supported.
+    /// Writes escape sequences directly to stdout after ratatui's draw pass.
+    fn render_art_image_protocol(&mut self) -> std::io::Result<()> {
+        use crate::ui::imgproto::{self, ImageProtocol};
+        use std::io::Write;
+
+        let proto = self.image_protocol;
+        if proto == ImageProtocol::None {
+            return Ok(());
+        }
+
+        let rect = match self.art_image_rect {
+            Some(r) if r.width > 0 && r.height > 0 => r,
+            _ => return Ok(()),
+        };
+
+        let raw = match &self.player.album_art.raw_image {
+            Some(data) if self.player.album_art.has_art => data,
+            _ => return Ok(()),
+        };
+
+        // Check if we need to re-encode the PNG for the current display size.
+        let display_size = (rect.width, rect.height);
+        let track_path = self.player.album_art.track_path.clone();
+        let need_reencode = self.cached_proto_png.is_none()
+            || self.cached_proto_size != display_size
+            || self.last_proto_art_path != track_path;
+
+        if need_reencode {
+            // Decode and resize image to target pixel dimensions.
+            // Kitty/iTerm2 handle scaling, but sending a reasonably sized image
+            // avoids bandwidth waste on every frame.
+            if let Some(img) = crate::ui::albumart::load_image(raw) {
+                // Target ~2x cell resolution for decent quality.
+                // Kitty uses cell dimensions; iTerm2 uses pixel dimensions.
+                // Use a reasonable pixel size based on cell count.
+                let px_w = (rect.width as u32) * 10; // ~10px per cell column
+                let px_h = (rect.height as u32) * 20; // ~20px per cell row (2:1 ratio)
+                let resized = img.resize(px_w, px_h, image::imageops::FilterType::Triangle);
+                if let Some(png) = imgproto::encode_png(&resized) {
+                    self.cached_proto_png = Some(png);
+                    self.cached_proto_size = display_size;
+                    self.last_proto_art_path = track_path;
+                } else {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
+        }
+
+        let png = match &self.cached_proto_png {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        let mut out = std::io::stdout().lock();
+
+        match proto {
+            ImageProtocol::Kitty => {
+                // Clear previous placement to avoid ghosting.
+                imgproto::kitty_clear(&mut out)?;
+                imgproto::render_kitty(
+                    &mut out, png, rect.x, rect.y, rect.width, rect.height,
+                )?;
+            }
+            ImageProtocol::Iterm2 => {
+                imgproto::render_iterm2(
+                    &mut out, png, rect.x, rect.y, rect.width, rect.height,
+                )?;
+            }
+            ImageProtocol::None => {}
+        }
+
+        out.flush()?;
+        Ok(())
     }
 
     /// Start scanning the music directory in a background thread.
@@ -246,6 +352,12 @@ impl App {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = input::disable_mouse();
+            // Clear Kitty image placements before leaving alternate screen.
+            if crate::ui::imgproto::detect() == crate::ui::imgproto::ImageProtocol::Kitty {
+                let mut out = std::io::stdout().lock();
+                let _ = crate::ui::imgproto::kitty_clear(&mut out);
+                let _ = std::io::Write::flush(&mut out);
+            }
             let _ = disable_raw_mode();
             let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
             default_hook(info);
@@ -267,6 +379,17 @@ impl App {
         self.save_recent_tracks();
 
         input::disable_mouse()?;
+        // Clear any Kitty image placements before leaving alternate screen.
+        if self.image_protocol == crate::ui::imgproto::ImageProtocol::Kitty {
+            let mut out = std::io::stdout().lock();
+            let _ = crate::ui::imgproto::kitty_clear(&mut out);
+            let _ = std::io::Write::flush(&mut out);
+        }
+        // Drain in-flight mouse/key events before leaving raw mode
+        // to prevent partial escape sequences leaking to the shell.
+        while crossterm::event::poll(Duration::from_millis(0))? {
+            let _ = crossterm::event::read();
+        }
         disable_raw_mode()?;
         crossterm::execute!(std::io::stdout(), LeaveAlternateScreen)?;
 
@@ -280,7 +403,8 @@ impl App {
         loop {
             // Process events from coordinators.
             self.player.process_events(&self.settings);
-            self.player.process_meta_events();
+            self.player.process_meta_events(&self.settings);
+            self.player.waveform.poll();
             self.process_scan_events();
 
             // Track recently played (only when the track changes).
@@ -289,6 +413,8 @@ impl App {
                     let path = path.clone();
                     self.record_recent(&path);
                     self.last_recorded_path = Some(path);
+                    // Reset Cava-style smoothing state for the new track.
+                    self.visualizer_state.reset();
                 } else {
                     self.last_recorded_path = None;
                 }
@@ -305,24 +431,25 @@ impl App {
                 PomodoroAction::None => {}
             }
 
-            // Glimmer timer: start a new wave every ~15 seconds.
-            const GLIMMER_INTERVAL: f64 = 15.0;
-            const GLIMMER_DURATION: f64 = 1.2; // seconds for wave to cross
-            if self.glimmer_wave.is_none()
-                && self.glimmer_last.elapsed().as_secs_f64() >= GLIMMER_INTERVAL
-            {
-                self.glimmer_wave = Some(Instant::now());
-            }
-            // Check if wave is finished.
-            if let Some(start) = self.glimmer_wave {
-                if start.elapsed().as_secs_f64() > GLIMMER_DURATION {
-                    self.glimmer_wave = None;
-                    self.glimmer_last = Instant::now();
-                }
-            }
-            let glimmer_progress = self.glimmer_wave.map(|s| {
-                (s.elapsed().as_secs_f64() / GLIMMER_DURATION).clamp(0.0, 1.0)
-            });
+            // Sync shimmer settings from config.
+            self.shimmer.enabled = self.settings.shimmer_enabled;
+            self.shimmer.intensity = self.settings.shimmer_intensity * 180.0;
+            self.shimmer.duration = 1.2 / self.settings.shimmer_speed as f64;
+            let shimmer_progress = self.shimmer.tick();
+
+            // Process spectrum through Cava-style smoothing/gravity.
+            let processed_spectrum = if !self.player.playing.spectrum.is_empty() {
+                self.visualizer_state.process(
+                    &self.player.playing.spectrum,
+                    60.0, // approximate framerate (~16ms poll)
+                    0.20, // noise reduction (lower = more responsive)
+                )
+            } else {
+                Vec::new()
+            };
+
+            // Reset art rect — set only when Playing tab renders.
+            self.art_image_rect = None;
 
             // Render.
             terminal.draw(|frame| {
@@ -403,7 +530,7 @@ impl App {
 
                 // Queue indicator.
                 let queue_len = self.player.queue.len();
-                if queue_len > 0 {
+                if queue_len > 1 {
                     let queue_label = format!(" Queue ({queue_len}) ");
                     let queue_label_len = queue_label.len() as u16;
                     let qx = right_x.saturating_sub(queue_label_len);
@@ -493,19 +620,60 @@ impl App {
                     }
                     1 => {
                         // Playing tab.
+                        // When EQ is visible, reduce album art to ensure enough space.
+                        let has_wf = self.settings.waveform_enabled && self.player.waveform.data.is_some();
+                        let wf_rows: u16 = if has_wf { 3 } else { 0 };
+                        let max_art_rows = if self.eq_state.visible {
+                            // Need at least 5 rows for EQ + 5 fixed rows (title/artist/album/controls/seek) + waveform.
+                            let min_eq = 5_u16;
+                            let fixed = 5 + wf_rows;
+                            let available_for_art = content.height.saturating_sub(fixed + min_eq);
+                            Some(available_for_art)
+                        } else {
+                            None
+                        };
                         frame.render_widget(
                             PlayingTab {
                                 state: &self.player.playing,
                                 queue: &self.player.queue,
                                 album_art: &self.player.album_art,
+                                waveform: if self.settings.waveform_enabled {
+                                    self.player.waveform.data.as_ref()
+                                } else {
+                                    None
+                                },
+                                seekbar_width: self.settings.seekbar_width as f64,
+                                processed_spectrum: &processed_spectrum,
+                                bar_style: self.settings.visualizer_bar_style,
+                                viz_bars: self.settings.viz_bars,
+                                viz_gap: self.settings.viz_gap,
+                                show_hz_labels: self.settings.show_hz_labels,
+                                viz_mode: self.settings.viz_mode,
+                                waveform_mode: self.settings.waveform_mode,
+                                max_art_rows,
+                                use_image_protocol: self.image_protocol != crate::ui::imgproto::ImageProtocol::None
+                                    && self.player.album_art.raw_image.is_some(),
                             },
                             content,
                         );
                         // Compute rects for mouse zones (must match PlayingTab layout).
-                        let art_rows = compute_art_rows(
+                        let mut art_rows = compute_art_rows(
                             self.player.album_art.has_art,
                             self.player.album_art.cells.len(),
                             content.height,
+                        );
+                        if let Some(max) = max_art_rows {
+                            art_rows = art_rows.min(max);
+                        }
+                        // Store art rect for image protocol rendering.
+                        self.art_image_rect = compute_art_rect(
+                            self.player.album_art.has_art,
+                            self.player.album_art.cells.len(),
+                            self.player.album_art.cells.first().map_or(0, |r| r.len()),
+                            content.x,
+                            content.y,
+                            content.width,
+                            art_rows,
                         );
                         // Controls line (play/pause + volume).
                         let controls_y = content.y + art_rows + 3;
@@ -517,10 +685,14 @@ impl App {
                                 height: 1,
                             });
                         }
+                        // Waveform rows below seek bar.
+                        let has_waveform = self.settings.waveform_enabled && self.player.waveform.data.is_some();
+                        let wave_rows: u16 = if has_waveform { 3 } else { 0 };
                         // Progress/seek bar (centered at 80% width).
                         let progress_y = content.y + art_rows + 4;
                         if progress_y < content.y + content.height {
-                            let bar_inner_w = ((content.width as f64) * 0.8) as u16;
+                            let seekbar_frac = (self.settings.seekbar_width as f64).clamp(0.5, 0.9);
+                            let bar_inner_w = ((content.width as f64) * seekbar_frac) as u16;
                             let bar_inner_w = bar_inner_w.max(20);
                             let bar_x_off = (content.width.saturating_sub(bar_inner_w)) / 2;
                             self.progress_bar_rect = Some(Rect {
@@ -532,8 +704,8 @@ impl App {
                         }
                         // EQ overlay on top of the visualizer area.
                         if self.eq_state.visible {
-                            let eq_y = content.y + art_rows + 6;
-                            let eq_h = content.height.saturating_sub(art_rows + 6);
+                            let eq_y = content.y + art_rows + 5 + wave_rows;
+                            let eq_h = content.height.saturating_sub(art_rows + 5 + wave_rows);
                             if eq_h >= 5 {
                                 let eq_area = Rect {
                                     x: content.x,
@@ -785,45 +957,54 @@ impl App {
                 // state directly, so the selected item is already painted correctly
                 // by the tab's render method using the same teal style.
 
-                // Glimmer effect — traveling brightness wave on Playing tab text.
+                // Shimmer effect — traveling brightness wave on Playing tab text + seek bar.
                 let buf = frame.buffer_mut();
                 if self.active_tab == 1 {
-                    if let (Some(progress), Some(content_rect)) = (glimmer_progress, self.content_rect) {
-                        let art_rows = compute_art_rows(
+                    if let (Some(progress), Some(content_rect)) = (shimmer_progress, self.content_rect) {
+                        let mut art_rows = compute_art_rows(
                             self.player.album_art.has_art,
                             self.player.album_art.cells.len(),
                             content_rect.height,
                         );
+                        // Match EQ art reduction from render.
+                        if self.eq_state.visible {
+                            let has_wf = self.settings.waveform_enabled && self.player.waveform.data.is_some();
+                            let wf_r: u16 = if has_wf { 3 } else { 0 };
+                            let max = content_rect.height.saturating_sub(5 + wf_r + 5);
+                            art_rows = art_rows.min(max);
+                        }
 
-                        let text_rows = [
+                        let text_rows: Vec<u16> = [
                             content_rect.y + art_rows,     // title
                             content_rect.y + art_rows + 1, // artist
                             content_rect.y + art_rows + 2, // album
-                        ];
+                        ]
+                        .into_iter()
+                        .filter(|&y| y < content_rect.y + content_rect.height)
+                        .collect();
 
-                        let w = content_rect.width as f64;
-                        let wave_center = progress * (w + 10.0) - 5.0;
-                        let wave_radius = 4.0;
+                        self.shimmer.apply_to_rows(
+                            buf,
+                            progress,
+                            content_rect.x,
+                            content_rect.width,
+                            &text_rows,
+                        );
 
-                        for &row_y in &text_rows {
-                            if row_y >= content_rect.y + content_rect.height {
-                                continue;
-                            }
-                            for cx in content_rect.x..content_rect.x + content_rect.width {
-                                let dist = ((cx - content_rect.x) as f64 - wave_center).abs();
-                                if dist > wave_radius {
-                                    continue;
-                                }
-                                if let Some(cell) = buf.cell_mut((cx, row_y)) {
-                                    let factor = 1.0 - (dist / wave_radius);
-                                    let bright = brighten_color(cell.fg, factor as f32);
-                                    cell.set_style(Style::default().fg(bright));
-                                }
-                            }
+                        // Shimmer the seek bar too.
+                        if let Some(bar_rect) = self.progress_bar_rect {
+                            self.shimmer.apply_to_rect(buf, progress, bar_rect);
                         }
                     }
                 }
             })?;
+
+            // Image protocol rendering — overlay real image on top of half-block art.
+            // Must happen after terminal.draw() so the cursor-addressed escapes
+            // land on top of ratatui's diff output.
+            if self.active_tab == 1 {
+                self.render_art_image_protocol()?;
+            }
 
             if self.should_quit {
                 return Ok(());
@@ -1536,6 +1717,12 @@ impl App {
                 // Settings.
                 self.settings_state.toggle(&mut self.settings);
                 let _ = self.settings.save();
+                // If waveform was just enabled and a track is playing, trigger scan.
+                if self.settings.waveform_enabled {
+                    if let Some(ref path) = self.player.playing.file_path {
+                        self.player.waveform.scan(path);
+                    }
+                }
             }
             _ => {}
         }
@@ -1612,6 +1799,31 @@ impl App {
         if self.active_tab == 3 && self.settings_state.editing {
             self.settings_state.edit_push(ch);
             return;
+        }
+        // EQ: 's' saves custom preset, 'x' deletes current custom preset.
+        if self.active_tab == 1 && self.eq_state.visible {
+            match ch {
+                's' | 'S' => {
+                    if self.eq_state.custom {
+                        let name = format!("Custom {}", self.eq_state.custom_presets.len() + 1);
+                        self.eq_state.save_custom_preset(name);
+                        self.sync_eq_presets_to_settings();
+                    }
+                    return;
+                }
+                'x' | 'X' => {
+                    // Delete current custom preset (only if viewing one).
+                    let builtin_count = crate::ui::widgets::eq::EQ_PRESETS.len();
+                    if self.eq_state.preset_index >= builtin_count && !self.eq_state.custom {
+                        let ci = self.eq_state.preset_index - builtin_count;
+                        self.eq_state.delete_custom_preset(ci);
+                        self.sync_eq_presets_to_settings();
+                        self.send_eq_gains();
+                    }
+                    return;
+                }
+                _ => {}
+            }
         }
         // Search popup: typing appends character.
         if self.search_visible {
@@ -1812,11 +2024,16 @@ impl App {
         // Playing tab click — album art or title/artist/album area toggles play/pause.
         if self.active_tab == 1 {
             if let Some(content_rect) = self.content_rect {
-                let art_rows = compute_art_rows(
+                let mut art_rows = compute_art_rows(
                     self.player.album_art.has_art,
                     self.player.album_art.cells.len(),
                     content_rect.height,
                 );
+                if self.eq_state.visible {
+                    let has_wf = self.settings.waveform_enabled && self.player.waveform.data.is_some();
+                    let wf_r: u16 = if has_wf { 3 } else { 0 };
+                    art_rows = art_rows.min(content_rect.height.saturating_sub(5 + wf_r + 5));
+                }
                 // Click on album art (exact pixel area).
                 let art_source_cols = self.player.album_art.cells.first().map_or(0, |r| r.len());
                 if let Some(art_rect) = compute_art_rect(
@@ -1929,6 +2146,11 @@ impl App {
                             if self.settings_state.selected == clicked_row {
                                 self.settings_state.toggle(&mut self.settings);
                                 let _ = self.settings.save();
+                                if self.settings.waveform_enabled {
+                                    if let Some(ref path) = self.player.playing.file_path {
+                                        self.player.waveform.scan(path);
+                                    }
+                                }
                             } else {
                                 self.settings_state.selected = clicked_row;
                             }
@@ -2159,6 +2381,14 @@ impl App {
     /// Send the current EQ gains to the audio engine.
     fn send_eq_gains(&mut self) {
         self.player.send(AudioCommand::SetEq(self.eq_state.gains));
+    }
+
+    /// Sync EQ custom presets from EqState back to Settings and save.
+    fn sync_eq_presets_to_settings(&mut self) {
+        self.settings.custom_eq_presets = self.eq_state.custom_presets.iter()
+            .map(|(name, gains)| CustomEqPreset { name: name.clone(), gains: *gains })
+            .collect();
+        let _ = self.settings.save();
     }
 
     fn mode_indicator(&self) -> String {
@@ -2575,37 +2805,3 @@ fn render_queue_popup(
     );
 }
 
-/// Brighten a ratatui Color toward white by `factor` (0.0 = unchanged, 1.0 = white).
-fn brighten_color(color: Color, factor: f32) -> Color {
-    let (r, g, b) = color_to_rgb(color);
-    let boost = (factor * 180.0) as u8;
-    Color::Rgb(
-        r.saturating_add(boost),
-        g.saturating_add(boost),
-        b.saturating_add(boost),
-    )
-}
-
-/// Map a ratatui named Color to approximate RGB values.
-fn color_to_rgb(color: Color) -> (u8, u8, u8) {
-    match color {
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::White => (200, 200, 200),
-        Color::Cyan => (0, 200, 200),
-        Color::Yellow => (200, 200, 0),
-        Color::Green => (0, 200, 0),
-        Color::Red => (200, 0, 0),
-        Color::Blue => (0, 0, 200),
-        Color::Magenta => (200, 0, 200),
-        Color::DarkGray => (100, 100, 100),
-        Color::Gray => (150, 150, 150),
-        Color::LightCyan => (100, 255, 255),
-        Color::LightYellow => (255, 255, 100),
-        Color::LightGreen => (100, 255, 100),
-        Color::LightRed => (255, 100, 100),
-        Color::LightBlue => (100, 100, 255),
-        Color::LightMagenta => (255, 100, 255),
-        Color::Black | Color::Reset => (0, 0, 0),
-        _ => (150, 150, 150),
-    }
-}

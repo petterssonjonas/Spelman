@@ -22,6 +22,8 @@ pub enum AudioCommand {
     SetEq([f32; 10]),
     /// Toggle the equalizer on or off.
     ToggleEq,
+    /// Set ReplayGain linear multiplier (1.0 = no change).
+    SetReplayGain(f32),
 }
 
 /// Events sent from the audio engine back to the UI thread.
@@ -42,6 +44,8 @@ pub enum AudioEvent {
     Resumed,
     /// Playback stopped (user requested stop).
     Stopped,
+    /// Track is about to finish — UI should send next Play immediately for gapless.
+    TrackEnding,
     /// Track finished playing naturally (for auto-advance).
     Finished,
     /// An error occurred.

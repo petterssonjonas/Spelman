@@ -34,7 +34,7 @@ impl Default for SettingsState {
 }
 
 /// Number of non-keybinding settings items.
-const BASE_ITEM_COUNT: usize = 6;
+const BASE_ITEM_COUNT: usize = 19;
 /// Separator row between settings and keybindings.
 const SEPARATOR_COUNT: usize = 1;
 
@@ -97,6 +97,76 @@ impl SettingsState {
                         "gruvbox" => "default".into(),
                         _ => "default".into(),
                     };
+                }
+                6 => {
+                    settings.shimmer_enabled = !settings.shimmer_enabled;
+                }
+                7 => {
+                    // Cycle shimmer intensity: 0.5 → 1.0 → 1.5 → 2.0 → 0.5
+                    settings.shimmer_intensity = match settings.shimmer_intensity {
+                        x if x < 0.75 => 1.0,
+                        x if x < 1.25 => 1.5,
+                        x if x < 1.75 => 2.0,
+                        _ => 0.5,
+                    };
+                }
+                8 => {
+                    // Cycle shimmer speed: 0.5 → 1.0 → 1.5 → 2.0 → 3.0 → 0.5
+                    settings.shimmer_speed = match settings.shimmer_speed {
+                        x if x < 0.75 => 1.0,
+                        x if x < 1.25 => 1.5,
+                        x if x < 1.75 => 2.0,
+                        x if x < 2.5 => 3.0,
+                        _ => 0.5,
+                    };
+                }
+                9 => {
+                    settings.waveform_enabled = !settings.waveform_enabled;
+                }
+                10 => {
+                    settings.waveform_mode = settings.waveform_mode.next();
+                }
+                11 => {
+                    // Cycle seekbar width: 50% → 60% → 70% → 75% → 80% → 85% → 90% → 50%
+                    settings.seekbar_width = match settings.seekbar_width {
+                        x if x < 0.55 => 0.60,
+                        x if x < 0.65 => 0.70,
+                        x if x < 0.73 => 0.75,
+                        x if x < 0.78 => 0.80,
+                        x if x < 0.83 => 0.85,
+                        x if x < 0.88 => 0.90,
+                        _ => 0.50,
+                    };
+                }
+                12 => {
+                    settings.viz_mode = settings.viz_mode.next();
+                }
+                13 => {
+                    settings.visualizer_bar_style = settings.visualizer_bar_style.next();
+                }
+                14 => {
+                    // Cycle viz bars: 12 → 16 → 24 → 32 → 48 → 64 → 12
+                    settings.viz_bars = match settings.viz_bars {
+                        x if x < 14 => 16,
+                        x if x < 20 => 24,
+                        x if x < 28 => 32,
+                        x if x < 40 => 48,
+                        x if x < 56 => 64,
+                        _ => 12,
+                    };
+                }
+                15 => {
+                    // Cycle viz gap: 0 → 1 → 2 → 3 → 0
+                    settings.viz_gap = (settings.viz_gap + 1) % 4;
+                }
+                16 => {
+                    settings.show_hz_labels = !settings.show_hz_labels;
+                }
+                17 => {
+                    settings.gapless = !settings.gapless;
+                }
+                18 => {
+                    settings.replay_gain = !settings.replay_gain;
                 }
                 _ => {}
             }
@@ -358,6 +428,58 @@ fn base_setting_items(settings: &Settings) -> Vec<(String, String)> {
             .into(),
         ),
         ("Theme".into(), settings.theme.clone()),
+        (
+            "Shimmer".into(),
+            if settings.shimmer_enabled { "On" } else { "Off" }.into(),
+        ),
+        (
+            "Shimmer Intensity".into(),
+            format!("{:.1}x", settings.shimmer_intensity),
+        ),
+        (
+            "Shimmer Speed".into(),
+            format!("{:.1}x", settings.shimmer_speed),
+        ),
+        (
+            "Waveform".into(),
+            if settings.waveform_enabled { "On" } else { "Off" }.into(),
+        ),
+        (
+            "Waveform Style".into(),
+            settings.waveform_mode.label().into(),
+        ),
+        (
+            "Seekbar Width".into(),
+            format!("{}%", (settings.seekbar_width * 100.0).round() as u32),
+        ),
+        (
+            "Viz Mode".into(),
+            settings.viz_mode.label().into(),
+        ),
+        (
+            "Bar Style".into(),
+            settings.visualizer_bar_style.label().into(),
+        ),
+        (
+            "Viz Bars".into(),
+            format!("{}", settings.viz_bars),
+        ),
+        (
+            "Viz Gap".into(),
+            format!("{}", settings.viz_gap),
+        ),
+        (
+            "Hz Labels".into(),
+            if settings.show_hz_labels { "On" } else { "Off" }.into(),
+        ),
+        (
+            "Gapless Playback".into(),
+            if settings.gapless { "On" } else { "Off" }.into(),
+        ),
+        (
+            "ReplayGain".into(),
+            if settings.replay_gain { "On" } else { "Off" }.into(),
+        ),
     ]
 }
 

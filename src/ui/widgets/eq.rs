@@ -100,16 +100,17 @@ pub struct EqState {
     pub enabled: bool,
     /// Current gain per band in dB, clamped to `[−12, +12]`.
     pub gains: [f32; NUM_EQ_BANDS],
-    /// Index into [`EQ_PRESETS`] for the currently displayed preset name.
+    /// Index into the combined preset list (built-in + custom).
     pub preset_index: usize,
+    /// Whether the current gains have been manually modified (shows "Custom").
+    pub custom: bool,
+    /// User-saved custom presets.
+    pub custom_presets: Vec<(String, [f32; NUM_EQ_BANDS])>,
     /// Band the mouse cursor is hovering over, or `None`.
     pub hovered_band: Option<usize>,
     /// Band that is keyboard-selected for scroll / arrow adjustment.
     pub selected_band: usize,
     /// Per-band column [`Rect`]s populated during the last `render_eq` call.
-    ///
-    /// These cover the full slider column including borders, and are used for
-    /// mouse hit-testing via [`EqState::band_at`].
     pub band_rects: [Option<Rect>; NUM_EQ_BANDS],
 }
 
@@ -120,6 +121,8 @@ impl Default for EqState {
             enabled: false,
             gains: [0.0; NUM_EQ_BANDS],
             preset_index: 0,
+            custom: false,
+            custom_presets: Vec::new(),
             hovered_band: None,
             selected_band: 0,
             band_rects: [None; NUM_EQ_BANDS],
@@ -138,41 +141,92 @@ impl EqState {
         self.enabled = !self.enabled;
     }
 
-    /// Advance to the next preset, wrapping around.
-    ///
-    /// Immediately copies the preset gains into `self.gains`.
-    pub fn next_preset(&mut self) {
-        if EQ_PRESETS.is_empty() { return; }
-        self.preset_index = (self.preset_index + 1) % EQ_PRESETS.len();
-        if let Some(preset) = EQ_PRESETS.get(self.preset_index) {
-            self.gains = preset.1;
+    /// Total number of presets (built-in + custom).
+    fn total_presets(&self) -> usize {
+        EQ_PRESETS.len() + self.custom_presets.len()
+    }
+
+    /// Get the name and gains for a preset by combined index.
+    fn preset_at(&self, index: usize) -> Option<(&str, [f32; NUM_EQ_BANDS])> {
+        if index < EQ_PRESETS.len() {
+            EQ_PRESETS.get(index).map(|(n, g)| (*n, *g))
+        } else {
+            let ci = index - EQ_PRESETS.len();
+            self.custom_presets.get(ci).map(|(n, g)| (n.as_str(), *g))
         }
+    }
+
+    /// Current preset name for display.
+    pub fn preset_name(&self) -> &str {
+        if self.custom {
+            "Custom"
+        } else if let Some((name, _)) = self.preset_at(self.preset_index) {
+            name
+        } else {
+            "Flat"
+        }
+    }
+
+    /// Advance to the next preset, wrapping around.
+    pub fn next_preset(&mut self) {
+        let total = self.total_presets();
+        if total == 0 { return; }
+        self.preset_index = (self.preset_index + 1) % total;
+        if let Some((_, gains)) = self.preset_at(self.preset_index) {
+            self.gains = gains;
+        }
+        self.custom = false;
     }
 
     /// Go back to the previous preset, wrapping around.
-    ///
-    /// Immediately copies the preset gains into `self.gains`.
     pub fn prev_preset(&mut self) {
-        if EQ_PRESETS.is_empty() { return; }
-        self.preset_index = (self.preset_index + EQ_PRESETS.len() - 1) % EQ_PRESETS.len();
-        if let Some(preset) = EQ_PRESETS.get(self.preset_index) {
-            self.gains = preset.1;
+        let total = self.total_presets();
+        if total == 0 { return; }
+        self.preset_index = (self.preset_index + total - 1) % total;
+        if let Some((_, gains)) = self.preset_at(self.preset_index) {
+            self.gains = gains;
         }
+        self.custom = false;
     }
 
     /// Adjust `band`'s gain by `delta` dB, clamping the result to `[−12, +12]`.
-    ///
-    /// Does nothing if `band >= NUM_EQ_BANDS`.
+    /// Marks the preset as "Custom".
     pub fn adjust_band(&mut self, band: usize, delta: f32) {
         if band < NUM_EQ_BANDS {
             self.gains[band] = (self.gains[band] + delta).clamp(-12.0, 12.0);
+            self.custom = true;
+        }
+    }
+
+    /// Save current gains as a custom preset.
+    pub fn save_custom_preset(&mut self, name: String) {
+        // If a custom preset with this name exists, update it.
+        if let Some(existing) = self.custom_presets.iter_mut().find(|(n, _)| n == &name) {
+            existing.1 = self.gains;
+        } else {
+            self.custom_presets.push((name, self.gains));
+        }
+        // Point to the saved preset.
+        let ci = self.custom_presets.len() - 1;
+        self.preset_index = EQ_PRESETS.len() + ci;
+        self.custom = false;
+    }
+
+    /// Delete a custom preset by its index within `custom_presets`.
+    pub fn delete_custom_preset(&mut self, custom_index: usize) {
+        if custom_index < self.custom_presets.len() {
+            self.custom_presets.remove(custom_index);
+            // Reset to Flat if the deleted preset was active.
+            if self.preset_index >= EQ_PRESETS.len() {
+                self.preset_index = 0;
+                self.gains = EQ_PRESETS[0].1;
+                self.custom = false;
+            }
         }
     }
 
     /// Return the band index that contains terminal cell `(col, row)`, or
     /// `None` if the position is outside every band rect.
-    ///
-    /// Uses the rects stored by the most recent [`render_eq`] call.
     #[must_use]
     pub fn band_at(&self, col: u16, row: u16) -> Option<usize> {
         for (i, rect) in self.band_rects.iter().enumerate() {
@@ -203,11 +257,26 @@ impl EqState {
 ///    with `█` above or below the 0 dB centre line, coloured by intensity.
 ///    A dotted centre line (`·`) marks 0 dB across every column.
 /// 4. **Gain values** (1 row) — `+6`, `-3`, ` 0`, … centred under each band.
+/// Maximum height for the EQ panel (header + freq + sliders + gain labels).
+const EQ_MAX_HEIGHT: u16 = 11;
+
 pub fn render_eq(state: &mut EqState, area: Rect, buf: &mut Buffer) {
     // Minimum viable render area.
     if area.width < 22 || area.height < 5 {
         return;
     }
+
+    // Cap height so the EQ doesn't consume too much vertical space.
+    let area = if area.height > EQ_MAX_HEIGHT {
+        // Anchor at the bottom of the available area.
+        Rect {
+            y: area.y + area.height - EQ_MAX_HEIGHT,
+            height: EQ_MAX_HEIGHT,
+            ..area
+        }
+    } else {
+        area
+    };
 
     // ── Vertical layout ───────────────────────────────────────────────────────
     //   [0] header         1 row
@@ -274,18 +343,26 @@ fn render_header(state: &EqState, area: Rect, buf: &mut Buffer) {
         Span::styled("[OFF] ", Style::default().fg(Color::DarkGray))
     };
 
-    let preset_name = EQ_PRESETS
-        .get(state.preset_index)
-        .map(|(n, _)| *n)
-        .unwrap_or("Flat");
+    let preset_name = state.preset_name();
 
+    let preset_color = if state.custom { Color::Yellow } else { Color::Cyan };
     let preset_span = Span::styled(
         format!(" \u{25c2} {preset_name} \u{25b8}"),
-        Style::default().fg(Color::Cyan),
+        Style::default().fg(preset_color),
     );
 
+    let hint_text = if state.custom {
+        "  [e:close  h/l:preset  scroll:adjust  s:save]"
+    } else {
+        let builtin_count = EQ_PRESETS.len();
+        if state.preset_index >= builtin_count {
+            "  [e:close  h/l:preset  scroll:adjust  x:delete]"
+        } else {
+            "  [e:close  h/l:preset  scroll:adjust]"
+        }
+    };
     let hint = Span::styled(
-        "  [e:close  \u{25c2}/\u{25b8}:preset  scroll:adjust]",
+        hint_text,
         Style::default().fg(Color::DarkGray),
     );
 

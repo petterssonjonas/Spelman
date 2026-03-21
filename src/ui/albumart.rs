@@ -5,13 +5,6 @@ use lofty::picture::PictureType;
 use ratatui::style::Color;
 use std::path::Path;
 
-// NOTE: Kitty graphics protocol image display is not currently used.
-// When running inside tmux, the Kitty protocol is not available even if the
-// outer terminal supports it (tmux does not pass through the escape sequences).
-// For now, album art always uses the half-block Unicode rendering, which works
-// everywhere including tmux panes. A future version could detect non-tmux Kitty
-// terminals and use the native image protocol for higher fidelity.
-
 /// Extract cover art from an audio file.
 pub fn extract_cover(path: &Path) -> Option<Vec<u8>> {
     let tagged = lofty::probe::Probe::open(path)
@@ -78,10 +71,13 @@ pub fn render_art(img: &DynamicImage, width: u32, height: u32) -> Vec<Vec<ArtCel
 pub struct AlbumArt {
     /// The path of the track this art belongs to.
     pub track_path: Option<std::path::PathBuf>,
-    /// Pre-rendered grid of colored cells (for ratatui rendering).
+    /// Pre-rendered grid of colored cells (for half-block fallback rendering).
     pub cells: Vec<Vec<ArtCell>>,
     /// Whether art was found.
     pub has_art: bool,
+    /// Raw image bytes (PNG/JPEG) for image protocol rendering.
+    /// Kept alongside cells so both paths are available.
+    pub raw_image: Option<Vec<u8>>,
 }
 
 impl Default for AlbumArt {
@@ -90,6 +86,7 @@ impl Default for AlbumArt {
             track_path: None,
             cells: Vec::new(),
             has_art: false,
+            raw_image: None,
         }
     }
 }

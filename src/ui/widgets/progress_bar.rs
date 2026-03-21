@@ -10,7 +10,7 @@ pub struct ProgressBar {
     pub style: Style,
     pub filled_char: char,
     pub empty_char: char,
-    /// Width as a fraction of the available area (0.0–1.0). Defaults to 0.8.
+    /// Width as a fraction of the available area (0.5–0.9). Defaults to 0.85.
     pub width_fraction: f64,
 }
 
@@ -22,7 +22,7 @@ impl Default for ProgressBar {
             style: Style::default().fg(Color::Cyan),
             filled_char: '━',
             empty_char: '─',
-            width_fraction: 0.8,
+            width_fraction: 0.85,
         }
     }
 }
@@ -35,6 +35,11 @@ impl ProgressBar {
 
     pub fn total(mut self, total: Duration) -> Self {
         self.total = total;
+        self
+    }
+
+    pub fn width_fraction(mut self, frac: f64) -> Self {
+        self.width_fraction = frac.clamp(0.5, 0.9);
         self
     }
 }
@@ -98,3 +103,29 @@ impl Widget for ProgressBar {
 }
 
 use crate::util::format::format_duration;
+
+/// Compute the actual bar-only geometry (x, width) for a given area,
+/// matching the exact layout the ProgressBar renders.
+/// Returns (bar_x, bar_width) — the region of the ━/─ bar excluding time labels.
+pub fn bar_geometry(area: Rect, elapsed: Duration, total: Duration, width_fraction: f64) -> Option<(u16, u16)> {
+    if area.width < 10 {
+        return None;
+    }
+    let inner_width = ((area.width as f64) * width_fraction.clamp(0.5, 0.9)) as u16;
+    let inner_width = inner_width.max(20);
+    let x_offset = (area.width.saturating_sub(inner_width)) / 2;
+    let inner_x = area.x + x_offset;
+
+    let time_left = format_duration(elapsed);
+    let time_right = format_duration(total);
+    let overhead = time_left.len() + time_right.len() + 2;
+    if (inner_width as usize) <= overhead {
+        return None;
+    }
+    let bar_width = inner_width as usize - overhead;
+    if bar_width < 4 {
+        return None;
+    }
+    let bar_x = inner_x + time_left.len() as u16 + 1;
+    Some((bar_x, bar_width as u16))
+}
