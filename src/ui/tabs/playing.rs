@@ -6,6 +6,7 @@ use ratatui::widgets::{Paragraph, Widget};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::lyrics::Lyrics;
 use crate::playlist::queue::Queue;
 use crate::ui::albumart::AlbumArt;
 use crate::ui::widgets::progress_bar::{ProgressBar, bar_geometry};
@@ -39,6 +40,10 @@ pub struct PlayingState {
     pub level: f32,
     /// Smoothed spectrum bars for visualizer (0.0-1.0 each).
     pub spectrum: Vec<f32>,
+    /// Resolved lyrics for the current track.
+    pub lyrics: Option<Lyrics>,
+    /// Whether lyrics display is currently active.
+    pub show_lyrics: bool,
 }
 
 impl Default for PlayingState {
@@ -56,6 +61,8 @@ impl Default for PlayingState {
             channels: 0,
             level: 0.0,
             spectrum: Vec::new(),
+            lyrics: None,
+            show_lyrics: false,
         }
     }
 }
@@ -93,8 +100,10 @@ pub struct PlayingTab<'a> {
     pub waveform_mode: WaveformMode,
     /// Maximum album art rows (reduced when EQ needs space).
     pub max_art_rows: Option<u16>,
-    /// When true, skip half-block art rendering (image protocol handles it).
-    pub use_image_protocol: bool,
+    /// Whether to show lyrics instead of album art.
+    pub show_lyrics: bool,
+    /// Resolved lyrics for the current track.
+    pub lyrics: Option<&'a Lyrics>,
 }
 
 impl<'a> Widget for PlayingTab<'a> {
@@ -114,10 +123,18 @@ impl<'a> Widget for PlayingTab<'a> {
             return;
         }
 
-        // Compute album art display size.
+        // Compute album art / lyrics display size.
+        let show_lyrics = self.show_lyrics && self.lyrics.is_some();
         let art_source_rows = self.album_art.cells.len();
         let art_source_cols = self.album_art.cells.first().map_or(0, |r| r.len());
-        let mut art_rows = compute_art_rows(self.album_art.has_art, art_source_rows, area.height);
+        let mut art_rows = if show_lyrics {
+            // Lyrics get the same space allocation as art would.
+            // Use at least 8 rows for lyrics readability.
+            let max_rows = area.height.saturating_sub(9) as usize;
+            max_rows.min(18).max(8) as u16
+        } else {
+            compute_art_rows(self.album_art.has_art, art_source_rows, area.height)
+        };
         // Respect max_art_rows override (e.g., when EQ needs space).
         if let Some(max) = self.max_art_rows {
             art_rows = art_rows.min(max);
@@ -141,42 +158,47 @@ impl<'a> Widget for PlayingTab<'a> {
         ])
         .split(area);
 
-        // --- Album art (top, centered, scaled to fit) ---
-        // Skip half-block rendering when image protocol will overlay real image.
-        if art_rows > 0 && !self.use_image_protocol {
-            let display_rows = art_rows as usize;
-            // Scale the art width proportionally to the height.
-            let scale = display_rows as f32 / art_source_rows as f32;
-            let display_cols = ((art_source_cols as f32) * scale).round() as usize;
-            let display_cols = display_cols.min(chunks[0].width as usize);
-
-            let art_x = chunks[0].x + (chunks[0].width.saturating_sub(display_cols as u16)) / 2;
-
-            for row_idx in 0..display_rows {
-                let y = chunks[0].y + row_idx as u16;
-                if y >= chunks[0].y + chunks[0].height {
-                    break;
+        // --- Album art or lyrics (top area) ---
+        if art_rows > 0 {
+            if show_lyrics {
+                // Render lyrics in the art area.
+                if let Some(lyrics) = self.lyrics {
+                    render_lyrics(buf, chunks[0], lyrics, self.state.elapsed);
                 }
-                // Map display row back to source row.
-                let src_row = (row_idx as f32 / scale).round() as usize;
-                let src_row = src_row.min(art_source_rows.saturating_sub(1));
-                let src = &self.album_art.cells[src_row];
+            } else {
+                // Half-block album art rendering (also serves as fallback under Kitty/iTerm2 images).
+                let display_rows = art_rows as usize;
+                let scale = display_rows as f32 / art_source_rows as f32;
+                let display_cols = ((art_source_cols as f32) * scale).round() as usize;
+                let display_cols = display_cols.min(chunks[0].width as usize);
 
-                for col_idx in 0..display_cols {
-                    let x = art_x + col_idx as u16;
-                    if x >= chunks[0].x + chunks[0].width {
+                let art_x =
+                    chunks[0].x + (chunks[0].width.saturating_sub(display_cols as u16)) / 2;
+
+                for row_idx in 0..display_rows {
+                    let y = chunks[0].y + row_idx as u16;
+                    if y >= chunks[0].y + chunks[0].height {
                         break;
                     }
-                    // Map display col back to source col.
-                    let src_col = (col_idx as f32 / scale).round() as usize;
-                    let src_col = src_col.min(art_source_cols.saturating_sub(1));
-                    let cell = &src[src_col];
-                    buf.set_string(
-                        x,
-                        y,
-                        "\u{2580}",
-                        Style::default().fg(cell.fg).bg(cell.bg),
-                    );
+                    let src_row = (row_idx as f32 / scale).round() as usize;
+                    let src_row = src_row.min(art_source_rows.saturating_sub(1));
+                    let src = &self.album_art.cells[src_row];
+
+                    for col_idx in 0..display_cols {
+                        let x = art_x + col_idx as u16;
+                        if x >= chunks[0].x + chunks[0].width {
+                            break;
+                        }
+                        let src_col = (col_idx as f32 / scale).round() as usize;
+                        let src_col = src_col.min(art_source_cols.saturating_sub(1));
+                        let cell = &src[src_col];
+                        buf.set_string(
+                            x,
+                            y,
+                            "\u{2580}",
+                            Style::default().fg(cell.fg).bg(cell.bg),
+                        );
+                    }
                 }
             }
         }
@@ -459,6 +481,93 @@ fn format_freq(freq: f64) -> String {
     }
 }
 
+/// Render lyrics in the given area, scrolling to center the current line.
+fn render_lyrics(buf: &mut Buffer, area: Rect, lyrics: &Lyrics, elapsed: Duration) {
+    if area.height == 0 || area.width < 10 {
+        return;
+    }
+
+    let total_lines = lyrics.line_count();
+    if total_lines == 0 {
+        return;
+    }
+
+    let visible_rows = area.height as usize;
+    let current_idx = lyrics.current_line_index(elapsed);
+
+    // Collect all non-empty lines with their original indices.
+    let all_visible: Vec<(usize, &str)> = (0..total_lines)
+        .map(|i| (i, lyrics.line_text(i)))
+        .filter(|(_, t)| !t.is_empty())
+        .collect();
+
+    // Find the visual index of the current line.
+    let current_visual_idx = current_idx.and_then(|cur| {
+        all_visible.iter().position(|(idx, _)| *idx == cur)
+    });
+
+    // Scroll so the current line is centered vertically.
+    let scroll = match current_visual_idx {
+        Some(vi) => vi.saturating_sub(visible_rows / 2),
+        None => 0,
+    };
+
+    let visible_lines: Vec<(usize, &str)> = all_visible
+        .into_iter()
+        .skip(scroll)
+        .take(visible_rows)
+        .collect();
+
+    // Find the visual position of the current line within the visible window.
+    let current_visual = current_idx.and_then(|cur| {
+        visible_lines.iter().position(|(idx, _)| *idx == cur)
+    });
+
+    for (visual_pos, &(_, text)) in visible_lines.iter().enumerate() {
+        let y = area.y + visual_pos as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+
+        // Determine style based on visual distance from current line.
+        // Current = cyan, above = darker fading up, below = drop then lighter then fade.
+        let style = match current_visual {
+            Some(cur_vis) => {
+                let diff = visual_pos as isize - cur_vis as isize;
+                if diff == 0 {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if diff < 0 {
+                    let dist = (-diff) as u8;
+                    match dist {
+                        1 => Style::default().fg(Color::Rgb(120, 120, 130)),
+                        2 => Style::default().fg(Color::Rgb(90, 90, 100)),
+                        3 => Style::default().fg(Color::Rgb(65, 65, 75)),
+                        _ => Style::default().fg(Color::Rgb(45, 45, 55)),
+                    }
+                } else {
+                    let dist = diff as u8;
+                    match dist {
+                        1 => Style::default().fg(Color::Rgb(170, 170, 180)),
+                        2 => Style::default().fg(Color::Rgb(120, 120, 130)),
+                        3 => Style::default().fg(Color::Rgb(80, 80, 90)),
+                        _ => Style::default().fg(Color::Rgb(50, 50, 60)),
+                    }
+                }
+            }
+            None => Style::default().fg(Color::Rgb(180, 180, 190)),
+        };
+
+        // Center the text horizontally.
+        let text_width = text.chars().count().min(area.width as usize);
+        let x = area.x + (area.width.saturating_sub(text_width as u16)) / 2;
+
+        let display_text: String = text.chars().take(area.width as usize).collect();
+        buf.set_string(x, y, &display_text, style);
+    }
+}
+
 /// Compute album art display rows — shared between render and mouse-rect code.
 /// Fixed items below art: title(1) + artist(1) + album(1) + controls(1)
 /// + seek(1) + waveform(3) + visualizer(1) = 9 rows minimum.
@@ -468,6 +577,23 @@ pub fn compute_art_rows(has_art: bool, source_rows: usize, area_height: u16) -> 
         source_rows.min(max_art_rows).min(18) as u16
     } else {
         0
+    }
+}
+
+/// Compute effective art/lyrics rows for mouse rect calculations.
+/// When lyrics are showing, uses the same allocation logic as PlayingTab::render.
+pub fn compute_effective_art_rows(
+    has_art: bool,
+    source_rows: usize,
+    area_height: u16,
+    show_lyrics: bool,
+    has_lyrics: bool,
+) -> u16 {
+    if show_lyrics && has_lyrics {
+        let max_rows = area_height.saturating_sub(9) as usize;
+        max_rows.min(18).max(8) as u16
+    } else {
+        compute_art_rows(has_art, source_rows, area_height)
     }
 }
 

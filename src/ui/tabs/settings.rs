@@ -34,7 +34,7 @@ impl Default for SettingsState {
 }
 
 /// Number of non-keybinding settings items.
-const BASE_ITEM_COUNT: usize = 19;
+const BASE_ITEM_COUNT: usize = 23;
 /// Separator row between settings and keybindings.
 const SEPARATOR_COUNT: usize = 1;
 
@@ -163,10 +163,23 @@ impl SettingsState {
                     settings.show_hz_labels = !settings.show_hz_labels;
                 }
                 17 => {
-                    settings.gapless = !settings.gapless;
+                    settings.lyrics_enabled = !settings.lyrics_enabled;
                 }
                 18 => {
+                    settings.lyrics_auto_fetch = !settings.lyrics_auto_fetch;
+                }
+                19 => {
+                    settings.gapless = !settings.gapless;
+                }
+                20 => {
                     settings.replay_gain = !settings.replay_gain;
+                }
+                21 => {
+                    settings.chroma_enabled = !settings.chroma_enabled;
+                }
+                22 => {
+                    // Cycle chroma lyrics backdrop: 0 → 1 → 2 → 3 → 0
+                    settings.chroma_lyrics_backdrop = (settings.chroma_lyrics_backdrop + 1) % 4;
                 }
                 _ => {}
             }
@@ -473,12 +486,33 @@ fn base_setting_items(settings: &Settings) -> Vec<(String, String)> {
             if settings.show_hz_labels { "On" } else { "Off" }.into(),
         ),
         (
+            "Lyrics".into(),
+            if settings.lyrics_enabled { "On" } else { "Off" }.into(),
+        ),
+        (
+            "Lyrics Auto-Fetch".into(),
+            if settings.lyrics_auto_fetch { "On" } else { "Off" }.into(),
+        ),
+        (
             "Gapless Playback".into(),
             if settings.gapless { "On" } else { "Off" }.into(),
         ),
         (
             "ReplayGain".into(),
             if settings.replay_gain { "On" } else { "Off" }.into(),
+        ),
+        (
+            "Chroma Visualizer".into(),
+            if settings.chroma_enabled { "On" } else { "Off" }.into(),
+        ),
+        (
+            "Chroma Lyrics Backdrop".into(),
+            match settings.chroma_lyrics_backdrop {
+                0 => "Off".into(),
+                1 => "Light".into(),
+                2 => "Medium".into(),
+                _ => "Heavy".into(),
+            },
         ),
     ]
 }

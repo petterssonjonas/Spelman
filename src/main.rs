@@ -3,6 +3,7 @@ mod audio;
 mod config;
 mod coordinator;
 mod library;
+mod lyrics;
 mod playlist;
 mod pomodoro;
 mod ui;

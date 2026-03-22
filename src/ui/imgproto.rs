@@ -30,27 +30,48 @@ pub fn detect() -> ImageProtocol {
 }
 
 fn detect_inner() -> ImageProtocol {
-    // Inside tmux, image protocols generally don't work (passthrough is
-    // unreliable and not universally supported).  Fall back immediately.
-    if std::env::var("TMUX").is_ok() {
-        return ImageProtocol::None;
-    }
-
-    // Kitty: TERM=xterm-kitty or KITTY_PID set.
-    // Also check TERM_PROGRAM for terminals that support the Kitty protocol
-    // without setting xterm-kitty (WezTerm, Ghostty).
     let term = std::env::var("TERM").unwrap_or_default();
     let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let kitty_pid = std::env::var("KITTY_PID").is_ok();
+    let tmux = std::env::var("TMUX").is_ok();
+
+    tracing::debug!(
+        "Image protocol detection: TERM={term:?}, TERM_PROGRAM={term_program:?}, KITTY_PID={kitty_pid}, TMUX={tmux}"
+    );
+
+    // Inside tmux, check if the *outer* terminal supports image protocols.
+    // Modern tmux (3.3+) can pass through Kitty graphics with `allow-passthrough`.
+    // We detect the outer terminal via TERM_PROGRAM (set by outer, inherited through tmux).
+    if tmux {
+        // KITTY_PID is inherited through tmux when running inside Kitty.
+        if kitty_pid || term_program.to_lowercase().contains("kitty") {
+            tracing::info!("Image protocol: Kitty detected through tmux (passthrough)");
+            return ImageProtocol::Kitty;
+        }
+        let tp_lower = term_program.to_lowercase();
+        if tp_lower.contains("wezterm") || tp_lower.contains("ghostty") {
+            tracing::info!("Image protocol: Kitty-compatible detected through tmux");
+            return ImageProtocol::Kitty;
+        }
+        if tp_lower.contains("iterm") {
+            tracing::info!("Image protocol: iTerm2 detected through tmux");
+            return ImageProtocol::Iterm2;
+        }
+        tracing::info!("Image protocol: disabled inside tmux (outer terminal unknown)");
+        return ImageProtocol::None;
+    }
 
     if term.contains("kitty")
         || std::env::var("KITTY_PID").is_ok()
     {
+        tracing::info!("Image protocol: Kitty (TERM={term:?}, KITTY_PID)");
         return ImageProtocol::Kitty;
     }
 
     // WezTerm and Ghostty support Kitty protocol.
     let tp_lower = term_program.to_lowercase();
     if tp_lower.contains("wezterm") || tp_lower.contains("ghostty") {
+        tracing::info!("Image protocol: Kitty-compatible (TERM_PROGRAM={term_program:?})");
         return ImageProtocol::Kitty;
     }
 
@@ -60,9 +81,11 @@ fn detect_inner() -> ImageProtocol {
             .map(|v| v.to_lowercase().contains("iterm"))
             .unwrap_or(false)
     {
+        tracing::info!("Image protocol: iTerm2");
         return ImageProtocol::Iterm2;
     }
 
+    tracing::info!("Image protocol: None (no supported protocol detected)");
     ImageProtocol::None
 }
 

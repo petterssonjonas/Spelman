@@ -1,10 +1,10 @@
 [package]
 name = "spelman"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A terminal music player written in Rust"
-license = "MIT"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/petterssonjonas/Spelman"
 homepage = "https://github.com/petterssonjonas/Spelman"
 authors = ["Jonas Pettersson"]
@@ -61,8 +61,19 @@ rustfft = "6"
 unicode-width = "0.2"
 
 # Image processing (album art)
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = true, features = ["png", "jpeg"] }
 base64 = "0.22"
+
+# HTTP (LRCLIB lyrics fetch)
+ureq = "3"
+
+# GPU-accelerated terminal visualizer (optional)
+chroma = { git = "https://github.com/yuri-xyz/chroma", branch = "develop", optional = true, default-features = true }
+pollster = { version = "0.4", optional = true }
+
+[features]
+default = ["chroma"]
+chroma = ["dep:chroma", "dep:pollster"]
 
 [package.metadata.deb]
 section = "sound"

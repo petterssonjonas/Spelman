@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::audio::engine::AudioEngine;
 use crate::config::settings::Settings;
+use crate::lyrics::{self, Lyrics};
 use crate::playlist::queue::Queue;
 use crate::ui::albumart::{self, AlbumArt, ArtCell};
 use crate::ui::tabs::playing::{PlaybackState, PlayingState};
@@ -21,6 +22,8 @@ struct TrackMeta {
     art_cells: Option<Vec<Vec<ArtCell>>>,
     /// Raw image bytes for image protocol rendering (Kitty/iTerm2).
     raw_image: Option<Vec<u8>>,
+    /// Resolved lyrics for the track.
+    lyrics: Option<Lyrics>,
     /// ReplayGain linear multiplier (None if no tag found).
     replay_gain: Option<f32>,
 }
@@ -189,7 +192,8 @@ impl PlayerCoordinator {
                     self.playing.channels = channels;
                     self.playing.elapsed = Duration::ZERO;
                     self.playing.file_path = Some(path.clone());
-                    self.load_metadata_async(&path);
+                    self.playing.lyrics = None; // clear lyrics for previous track
+                    self.load_metadata_async(&path, duration, settings.lyrics_auto_fetch);
                     // Clear old waveform and start background scan if enabled.
                     self.waveform.clear();
                     if settings.waveform_enabled {
@@ -262,6 +266,9 @@ impl PlayerCoordinator {
                         tracing::info!("ReplayGain: {:.2}x linear for {:?}", rg, meta.path.file_name().unwrap_or_default());
                     }
 
+                    // Apply lyrics.
+                    self.playing.lyrics = meta.lyrics;
+
                     if let Some(cells) = meta.art_cells {
                         self.album_art.track_path = Some(meta.path);
                         self.album_art.cells = cells;
@@ -282,9 +289,9 @@ impl PlayerCoordinator {
         }
     }
 
-    /// Spawn a background thread to load metadata + album art.
+    /// Spawn a background thread to load metadata + album art + lyrics.
     /// Cancels any previously running metadata loader.
-    fn load_metadata_async(&mut self, path: &std::path::Path) {
+    fn load_metadata_async(&mut self, path: &std::path::Path, duration: Duration, lyrics_auto_fetch: bool) {
         use lofty::file::TaggedFileExt;
         use lofty::tag::Accessor;
 
@@ -309,6 +316,7 @@ impl PlayerCoordinator {
                     album: String::new(),
                     art_cells: None,
                     raw_image: None,
+                    lyrics: None,
                     replay_gain: None,
                 };
 
@@ -326,6 +334,18 @@ impl PlayerCoordinator {
 
                             // Parse ReplayGain from tag items.
                             meta.replay_gain = parse_replay_gain(tag);
+
+                            // Resolve lyrics (.lrc sidecar → embedded tag → LRCLIB fetch).
+                            if cancel.load(Ordering::Acquire) { return; }
+                            meta.lyrics = lyrics::resolve_lyrics(
+                                &path,
+                                &meta.title,
+                                &meta.artist,
+                                &meta.album,
+                                duration,
+                                tag,
+                                lyrics_auto_fetch,
+                            );
 
                             // Check cancellation before expensive image decode.
                             if cancel.load(Ordering::Acquire) { return; }

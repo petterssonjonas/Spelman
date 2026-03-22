@@ -130,6 +130,8 @@ pub enum BindableAction {
     DeletePlaylist,
     SkipPomodoro,
     CyclePomodoroStyle,
+    ToggleLyrics,
+    ToggleChroma,
 }
 
 impl BindableAction {
@@ -166,6 +168,8 @@ impl BindableAction {
             Self::DeletePlaylist => "Delete Playlist",
             Self::SkipPomodoro => "Skip Pomodoro Phase",
             Self::CyclePomodoroStyle => "Cycle Timer Style",
+            Self::ToggleLyrics => "Toggle Lyrics",
+            Self::ToggleChroma => "Chroma Visualizer",
         }
     }
 
@@ -201,6 +205,8 @@ impl BindableAction {
         Self::DeletePlaylist,
         Self::SkipPomodoro,
         Self::CyclePomodoroStyle,
+        Self::ToggleLyrics,
+        Self::ToggleChroma,
     ];
 }
 
@@ -303,6 +309,8 @@ impl Default for KeyBindings {
         b.insert(DeletePlaylist, vec!["d".into()]);
         b.insert(SkipPomodoro, vec!["f".into()]);
         b.insert(CyclePomodoroStyle, vec!["v".into()]);
+        b.insert(ToggleLyrics, vec!["L".into()]);
+        b.insert(ToggleChroma, vec!["6".into()]);
 
         Self { bindings: b }
     }
@@ -371,6 +379,8 @@ impl KeyBindings {
             DeletePlaylist => &["d"],
             SkipPomodoro => &["f"],
             CyclePomodoroStyle => &["v"],
+            ToggleLyrics => &["L"],
+            ToggleChroma => &["6"],
         }
     }
 
@@ -432,12 +442,21 @@ pub struct Settings {
     pub viz_gap: usize,
     #[serde(default)]
     pub show_hz_labels: bool,
+    #[serde(default)]
+    pub lyrics_enabled: bool,
+    #[serde(default = "default_true")]
+    pub lyrics_auto_fetch: bool,
     #[serde(default = "default_true")]
     pub gapless: bool,
     #[serde(default = "default_true")]
     pub replay_gain: bool,
     #[serde(default)]
     pub custom_eq_presets: Vec<CustomEqPreset>,
+    #[serde(default)]
+    pub chroma_enabled: bool,
+    /// Lyrics backdrop darkness level in Chroma overlay: 0=off, 1=light, 2=medium, 3=heavy.
+    #[serde(default = "default_chroma_backdrop")]
+    pub chroma_lyrics_backdrop: u8,
 }
 
 /// A user-saved EQ preset, serializable to TOML.
@@ -449,6 +468,7 @@ pub struct CustomEqPreset {
 
 fn default_true() -> bool { true }
 fn default_one() -> f32 { 1.0 }
+fn default_chroma_backdrop() -> u8 { 2 }
 fn default_seekbar_width() -> f32 { 0.85 }
 fn default_viz_bars() -> usize { 32 }
 fn default_viz_gap() -> usize { 1 }
@@ -478,9 +498,13 @@ impl Default for Settings {
             viz_bars: 32,
             viz_gap: 1,
             show_hz_labels: false,
+            lyrics_enabled: false,
+            lyrics_auto_fetch: true,
             gapless: true,
             replay_gain: true,
             custom_eq_presets: Vec::new(),
+            chroma_enabled: false,
+            chroma_lyrics_backdrop: 2,
         }
     }
 }

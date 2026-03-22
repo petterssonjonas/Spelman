@@ -22,7 +22,7 @@ use crate::ui::input::{self, Action};
 use crate::ui::layout;
 use crate::ui::tabs::home::{HomePane, HomeState, HomeTab};
 use crate::ui::tabs::library::{LibraryState, LibrarySortMode, LibraryTab, LibraryView};
-use crate::ui::tabs::playing::{PlaybackState, PlayingTab, compute_art_rows, compute_art_rect};
+use crate::ui::tabs::playing::{PlaybackState, PlayingTab, compute_art_rows, compute_art_rect, compute_effective_art_rows};
 use crate::ui::tabs::playlists::PlaylistsState;
 use crate::ui::tabs::pomodoro::PomodoroTab;
 use crate::ui::tabs::search::{SearchState, SearchTab};
@@ -128,6 +128,17 @@ pub struct App {
     cached_proto_png: Option<Vec<u8>>,
     /// Cached display size that the PNG was encoded for.
     cached_proto_size: (u16, u16),
+    /// Whether a Kitty image is currently placed on screen.
+    kitty_image_active: bool,
+    /// Chroma GPU visualizer overlay visible.
+    #[cfg(feature = "chroma")]
+    chroma_visible: bool,
+    /// Chroma GPU visualizer state (lazy-init on first toggle).
+    #[cfg(feature = "chroma")]
+    chroma_state: Option<crate::ui::widgets::chroma::ChromaState>,
+    /// Chroma indicator rect in tab bar (for mouse click).
+    #[cfg(feature = "chroma")]
+    chroma_indicator_rect: Option<Rect>,
 }
 
 /// Where a new playlist's tracks come from.
@@ -140,7 +151,8 @@ enum PlaylistSource {
 
 impl App {
     pub fn new(settings: Settings) -> Self {
-        let player = PlayerCoordinator::new(settings.default_volume);
+        let mut player = PlayerCoordinator::new(settings.default_volume);
+        player.playing.show_lyrics = settings.lyrics_enabled;
         let mut playlists_state = PlaylistsState::default();
         playlists_state.reload();
         let key_lookup = settings.keybindings.build_lookup();
@@ -206,6 +218,13 @@ impl App {
             last_proto_art_path: None,
             cached_proto_png: None,
             cached_proto_size: (0, 0),
+            kitty_image_active: false,
+            #[cfg(feature = "chroma")]
+            chroma_visible: false,
+            #[cfg(feature = "chroma")]
+            chroma_state: None,
+            #[cfg(feature = "chroma")]
+            chroma_indicator_rect: None,
         }
     }
 
@@ -224,14 +243,28 @@ impl App {
             return Ok(());
         }
 
+        // Always clear previous Kitty placement first to prevent ghosting.
+        // The image is a separate graphics layer — must be explicitly removed.
+        if proto == ImageProtocol::Kitty && self.kitty_image_active {
+            let mut out = std::io::stdout().lock();
+            imgproto::kitty_clear(&mut out)?;
+            out.flush()?;
+            self.kitty_image_active = false;
+        }
+
         let rect = match self.art_image_rect {
             Some(r) if r.width > 0 && r.height > 0 => r,
             _ => return Ok(()),
         };
 
+        let has_raw = self.player.album_art.raw_image.is_some();
+        let has_art = self.player.album_art.has_art;
         let raw = match &self.player.album_art.raw_image {
-            Some(data) if self.player.album_art.has_art => data,
-            _ => return Ok(()),
+            Some(data) if has_art => data,
+            _ => {
+                tracing::debug!("art_image_protocol: skipping (has_raw={has_raw}, has_art={has_art})");
+                return Ok(());
+            }
         };
 
         // Check if we need to re-encode the PNG for the current display size.
@@ -242,15 +275,9 @@ impl App {
             || self.last_proto_art_path != track_path;
 
         if need_reencode {
-            // Decode and resize image to target pixel dimensions.
-            // Kitty/iTerm2 handle scaling, but sending a reasonably sized image
-            // avoids bandwidth waste on every frame.
             if let Some(img) = crate::ui::albumart::load_image(raw) {
-                // Target ~2x cell resolution for decent quality.
-                // Kitty uses cell dimensions; iTerm2 uses pixel dimensions.
-                // Use a reasonable pixel size based on cell count.
-                let px_w = (rect.width as u32) * 10; // ~10px per cell column
-                let px_h = (rect.height as u32) * 20; // ~20px per cell row (2:1 ratio)
+                let px_w = (rect.width as u32) * 10;
+                let px_h = (rect.height as u32) * 20;
                 let resized = img.resize(px_w, px_h, image::imageops::FilterType::Triangle);
                 if let Some(png) = imgproto::encode_png(&resized) {
                     self.cached_proto_png = Some(png);
@@ -273,11 +300,10 @@ impl App {
 
         match proto {
             ImageProtocol::Kitty => {
-                // Clear previous placement to avoid ghosting.
-                imgproto::kitty_clear(&mut out)?;
                 imgproto::render_kitty(
                     &mut out, png, rect.x, rect.y, rect.width, rect.height,
                 )?;
+                self.kitty_image_active = true;
             }
             ImageProtocol::Iterm2 => {
                 imgproto::render_iterm2(
@@ -448,6 +474,16 @@ impl App {
                 Vec::new()
             };
 
+            // Tick Chroma GPU visualizer if active (uses full terminal area).
+            #[cfg(feature = "chroma")]
+            if self.chroma_visible {
+                if let Some(ref mut chroma) = self.chroma_state {
+                    // Use full terminal size, not just content area.
+                    let size = crossterm::terminal::size().unwrap_or((80, 24));
+                    chroma.tick(&processed_spectrum, size.0 as u32, size.1 as u32);
+                }
+            }
+
             // Reset art rect — set only when Playing tab renders.
             self.art_image_rect = None;
 
@@ -482,6 +518,13 @@ impl App {
                 let _dim = tc.text_dim();
                 let highlight = tc.highlight();
 
+                // Skip all UI rendering when Chroma overlay covers the full screen.
+                #[cfg(feature = "chroma")]
+                let skip_tab_content = self.chroma_visible && self.chroma_state.as_ref().map_or(false, |c| c.latest_frame.is_some());
+                #[cfg(not(feature = "chroma"))]
+                let skip_tab_content = false;
+
+                if !skip_tab_content {
                 // Tab bar — no number prefixes, just names.
                 let mut tab_spans = Vec::new();
                 for (i, name) in TAB_NAMES.iter().enumerate() {
@@ -548,6 +591,28 @@ impl App {
                     self.queue_indicator_rect = None;
                 }
 
+                // Chroma visualizer indicator.
+                #[cfg(feature = "chroma")]
+                if self.settings.chroma_enabled {
+                    let chroma_label = " Chroma ";
+                    let chroma_label_len = chroma_label.len() as u16;
+                    let cx = right_x.saturating_sub(chroma_label_len);
+                    self.chroma_indicator_rect = Some(Rect {
+                        x: cx, y: header.y, width: chroma_label_len, height: 1,
+                    });
+                    let ci_style = if self.chroma_visible {
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                    } else {
+                        Style::default().fg(highlight)
+                    };
+                    buf.set_string(cx, header.y, chroma_label, ci_style);
+                    right_x = cx;
+                }
+                #[cfg(feature = "chroma")]
+                if !self.settings.chroma_enabled {
+                    self.chroma_indicator_rect = None;
+                }
+
                 // Active playlist indicator.
                 if let Some(ref pl_name) = self.active_playlist {
                     let pl_label = format!(" {pl_name} ");
@@ -565,9 +630,12 @@ impl App {
                 } else {
                     self.playlist_indicator_rect = None;
                 }
+                } // end if !skip_tab_content
 
-                // Main content.
-                match self.active_tab {
+                if skip_tab_content {
+                    self.progress_bar_rect = None;
+                    self.controls_rect = None;
+                } else { match self.active_tab {
                     0 => {
                         // Home tab.
                         let kb_key = self.settings.keybindings
@@ -651,30 +719,34 @@ impl App {
                                 viz_mode: self.settings.viz_mode,
                                 waveform_mode: self.settings.waveform_mode,
                                 max_art_rows,
-                                use_image_protocol: self.image_protocol != crate::ui::imgproto::ImageProtocol::None
-                                    && self.player.album_art.raw_image.is_some(),
+                                show_lyrics: self.player.playing.show_lyrics,
+                                lyrics: self.player.playing.lyrics.as_ref(),
                             },
                             content,
                         );
                         // Compute rects for mouse zones (must match PlayingTab layout).
-                        let mut art_rows = compute_art_rows(
+                        let mut art_rows = compute_effective_art_rows(
                             self.player.album_art.has_art,
                             self.player.album_art.cells.len(),
                             content.height,
+                            self.player.playing.show_lyrics,
+                            self.player.playing.lyrics.is_some(),
                         );
                         if let Some(max) = max_art_rows {
                             art_rows = art_rows.min(max);
                         }
-                        // Store art rect for image protocol rendering.
-                        self.art_image_rect = compute_art_rect(
-                            self.player.album_art.has_art,
-                            self.player.album_art.cells.len(),
-                            self.player.album_art.cells.first().map_or(0, |r| r.len()),
-                            content.x,
-                            content.y,
-                            content.width,
-                            art_rows,
-                        );
+                        // Store art rect for image protocol rendering (skip when lyrics shown).
+                        if !self.player.playing.show_lyrics {
+                            self.art_image_rect = compute_art_rect(
+                                self.player.album_art.has_art,
+                                self.player.album_art.cells.len(),
+                                self.player.album_art.cells.first().map_or(0, |r| r.len()),
+                                content.x,
+                                content.y,
+                                content.width,
+                                art_rows,
+                            );
+                        }
                         // Controls line (play/pause + volume).
                         let controls_y = content.y + art_rows + 3;
                         if controls_y < content.y + content.height {
@@ -762,6 +834,25 @@ impl App {
                     _ => {
                         self.progress_bar_rect = None;
                         self.controls_rect = None;
+                    }
+                } } // close match + if !skip_tab_content
+
+                // --- Chroma fullscreen visualizer overlay (covers entire terminal) ---
+                #[cfg(feature = "chroma")]
+                if self.chroma_visible {
+                    if let Some(ref chroma) = self.chroma_state {
+                        if let Some(ref frame_data) = chroma.latest_frame {
+                            use crate::ui::widgets::chroma::ChromaOverlay;
+                            ChromaOverlay {
+                                frame: frame_data,
+                                lyrics: self.player.playing.lyrics.as_ref(),
+                                elapsed: self.player.playing.elapsed,
+                                show_lyrics: self.player.playing.show_lyrics,
+                                pattern_name: chroma.pattern_name(),
+                                backdrop_level: self.settings.chroma_lyrics_backdrop,
+                            }
+                            .render(area, frame.buffer_mut());
+                        }
                     }
                 }
 
@@ -961,10 +1052,12 @@ impl App {
                 let buf = frame.buffer_mut();
                 if self.active_tab == 1 {
                     if let (Some(progress), Some(content_rect)) = (shimmer_progress, self.content_rect) {
-                        let mut art_rows = compute_art_rows(
+                        let mut art_rows = compute_effective_art_rows(
                             self.player.album_art.has_art,
                             self.player.album_art.cells.len(),
                             content_rect.height,
+                            self.player.playing.show_lyrics,
+                            self.player.playing.lyrics.is_some(),
                         );
                         // Match EQ art reduction from render.
                         if self.eq_state.visible {
@@ -1002,8 +1095,21 @@ impl App {
             // Image protocol rendering — overlay real image on top of half-block art.
             // Must happen after terminal.draw() so the cursor-addressed escapes
             // land on top of ratatui's diff output.
-            if self.active_tab == 1 {
-                self.render_art_image_protocol()?;
+            {
+                let should_render = self.active_tab == 1;
+                // Don't render protocol image when Chroma overlay covers the screen.
+                #[cfg(feature = "chroma")]
+                let should_render = should_render && !self.chroma_visible;
+
+                if should_render {
+                    self.render_art_image_protocol()?;
+                } else if self.kitty_image_active {
+                    // Clear lingering Kitty images when leaving Playing tab or overlay covers it.
+                    let mut out = std::io::stdout().lock();
+                    let _ = crate::ui::imgproto::kitty_clear(&mut out);
+                    let _ = std::io::Write::flush(&mut out);
+                    self.kitty_image_active = false;
+                }
             }
 
             if self.should_quit {
@@ -1070,6 +1176,11 @@ impl App {
         use BindableAction::*;
         match action {
             Quit => {
+                #[cfg(feature = "chroma")]
+                if self.chroma_visible {
+                    self.chroma_visible = false;
+                    return;
+                }
                 if self.naming_playlist.is_some() {
                     self.naming_playlist = None;
                     self.playlist_name_buf.clear();
@@ -1080,6 +1191,10 @@ impl App {
                 } else if self.keybindings_visible {
                     self.keybindings_visible = false;
                 } else {
+                    #[cfg(feature = "chroma")]
+                    if let Some(ref mut chroma) = self.chroma_state {
+                        chroma.shutdown();
+                    }
                     self.player.shutdown();
                     self.should_quit = true;
                 }
@@ -1120,6 +1235,13 @@ impl App {
                 }
             }
             TabNext => {
+                #[cfg(feature = "chroma")]
+                if self.chroma_visible {
+                    if let Some(ref mut chroma) = self.chroma_state {
+                        chroma.next_pattern();
+                    }
+                    return;
+                }
                 if self.naming_playlist.is_none() && !self.search_visible && !self.pomodoro_visible && !self.keybindings_visible {
                     // Left/Right in content: context-specific (e.g., sort mode, pane switch).
                     if !self.focus_tabbar {
@@ -1147,6 +1269,13 @@ impl App {
                 }
             }
             TabPrev => {
+                #[cfg(feature = "chroma")]
+                if self.chroma_visible {
+                    if let Some(ref mut chroma) = self.chroma_state {
+                        chroma.prev_pattern();
+                    }
+                    return;
+                }
                 if self.naming_playlist.is_none() && !self.search_visible && !self.pomodoro_visible && !self.keybindings_visible {
                     if !self.focus_tabbar {
                         match self.active_tab {
@@ -1350,7 +1479,45 @@ impl App {
                     self.pomodoro.cycle_style();
                 }
             }
+            ToggleLyrics => {
+                if self.active_tab == 1 {
+                    self.player.playing.show_lyrics = !self.player.playing.show_lyrics;
+                }
+            }
+            ToggleChroma => {
+                #[cfg(feature = "chroma")]
+                self.toggle_chroma();
+            }
         }
+    }
+
+    /// Toggle the Chroma fullscreen visualizer overlay.
+    #[cfg(feature = "chroma")]
+    fn toggle_chroma(&mut self) {
+        use crate::ui::widgets::chroma::ChromaState;
+
+        if self.chroma_visible {
+            self.chroma_visible = false;
+            return;
+        }
+
+        // Lazy-init the GPU thread on first toggle.
+        if self.chroma_state.is_none() {
+            let (w, h) = self.content_rect
+                .map(|r| (r.width as u32, r.height as u32))
+                .unwrap_or((80, 24));
+            match ChromaState::new(w, h) {
+                Some(state) => {
+                    self.chroma_state = Some(state);
+                }
+                None => {
+                    tracing::warn!("Chroma: GPU not available");
+                    return;
+                }
+            }
+        }
+
+        self.chroma_visible = true;
     }
 
     /// Whether a text input field is currently capturing keyboard input.
@@ -1717,6 +1884,8 @@ impl App {
                 // Settings.
                 self.settings_state.toggle(&mut self.settings);
                 let _ = self.settings.save();
+                // Sync lyrics display state from setting.
+                self.player.playing.show_lyrics = self.settings.lyrics_enabled;
                 // If waveform was just enabled and a track is playing, trigger scan.
                 if self.settings.waveform_enabled {
                     if let Some(ref path) = self.player.playing.file_path {
@@ -1729,6 +1898,12 @@ impl App {
     }
 
     fn handle_back(&mut self) {
+        #[cfg(feature = "chroma")]
+        if self.chroma_visible {
+            self.chroma_visible = false;
+            return;
+        }
+
         if self.naming_playlist.is_some() {
             self.naming_playlist = None;
             self.playlist_name_buf.clear();
@@ -1939,8 +2114,21 @@ impl App {
         // Close button [X] click.
         if let Some(cb_rect) = self.close_button_rect {
             if row == cb_rect.y && col >= cb_rect.x && col < cb_rect.x + cb_rect.width {
+                #[cfg(feature = "chroma")]
+                if let Some(ref mut chroma) = self.chroma_state {
+                    chroma.shutdown();
+                }
                 self.player.shutdown();
                 self.should_quit = true;
+                return;
+            }
+        }
+
+        // Chroma indicator click.
+        #[cfg(feature = "chroma")]
+        if let Some(ci_rect) = self.chroma_indicator_rect {
+            if row == ci_rect.y && col >= ci_rect.x && col < ci_rect.x + ci_rect.width {
+                self.toggle_chroma();
                 return;
             }
         }
@@ -2024,10 +2212,12 @@ impl App {
         // Playing tab click — album art or title/artist/album area toggles play/pause.
         if self.active_tab == 1 {
             if let Some(content_rect) = self.content_rect {
-                let mut art_rows = compute_art_rows(
+                let mut art_rows = compute_effective_art_rows(
                     self.player.album_art.has_art,
                     self.player.album_art.cells.len(),
                     content_rect.height,
+                    self.player.playing.show_lyrics,
+                    self.player.playing.lyrics.is_some(),
                 );
                 if self.eq_state.visible {
                     let has_wf = self.settings.waveform_enabled && self.player.waveform.data.is_some();
@@ -2146,6 +2336,7 @@ impl App {
                             if self.settings_state.selected == clicked_row {
                                 self.settings_state.toggle(&mut self.settings);
                                 let _ = self.settings.save();
+                                self.player.playing.show_lyrics = self.settings.lyrics_enabled;
                                 if self.settings.waveform_enabled {
                                     if let Some(ref path) = self.player.playing.file_path {
                                         self.player.waveform.scan(path);

@@ -6,6 +6,12 @@ Ideas for features and improvements. Remove items as they are implemented.
 
 - **Crossfade** — fade out the last N seconds of a track while fading in the next one. Needs a second decoder running in parallel, mixing into the ring buffer. - Toggle on or off in settings.
 
+- Add ALAC, AIFF, mkv, caf, mpc feature flags to enable in symphonia
+
+- Look at Opus support, opus or audiopus crate.
+
+- WMA/ASF, APE, MPC are also not supported, look at those, 
+
 ## UI / Visual
 
 - **Lyrics display** — parse embedded lyrics from tags (USLT/SYLT) or .lrc sidecar files, display synced lyrics on the Playing tab scrolling in time with playback. Can be toggled on of off and replace album art.
