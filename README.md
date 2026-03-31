@@ -1,20 +1,26 @@
 # Spelman
 ## [Swedish] The one who plays.
 
-An modern featured terminal music player vibe-coded in Rust.
+A modern, feature-rich terminal music player built in Rust.
 
-AI Features planned, ACE-Step integation for local AI or BYOK for your cloud service.
+![Playing tab with EQ and spectrum visualizer](assets/screenshots/Spelman2.png)
+
+![Waveform overview and visualizer](assets/screenshots/Spelman3.png)
+
+![Home screen](assets/screenshots/Spelman4.png)
 
 ## Features
 
-- **Audio playback** — MP3, FLAC, OGG, Opus, WAV, AAC via symphonia (pure Rust decoding)
+- **Audio playback** — MP3, FLAC, OGG, Opus, WAV, AAC via Symphonia (pure Rust)
+- **Gapless playback** — seamless album transitions with ReplayGain normalization
 - **Low-latency audio** — cpal output with lock-free ring buffer, no allocations in the audio callback
-- **Visualizers** — Both Cava and Chroma
-- **Real album art images** — ASCII Art for terminals that dont support kitty images.
+- **Visualizers** — real-time FFT spectrum, Chroma GPU effects, waveform overview
+- **Album art** — Kitty/iTerm2 image protocol with ASCII art fallback
+- **10-band graphic EQ** — real-time biquad filters with presets
 - **Metadata display** — title, artist, album via lofty
-- **TUI** — ratatui-based interface with tab bar, progress bar, level meter
-- **Pomodoro timer** — A pomodoro popup overlay
-- **Built in EQ** — popup a real-time equalizer with presets
+- **TUI** — ratatui-based interface with tabs, seek bar, volume, level meter
+- **Pomodoro timer** — built-in pomodoro overlay
+- **Lyrics** — fetch and display lyrics for the current track
 
 ## Building
 
@@ -48,54 +54,18 @@ sudo apt install libasound2-dev
          │
          ▼
 ┌──────────────────┐
-│  Library Thread   │  (coming soon)
+│  Library Thread   │
 │  (scan + index)   │
 └──────────────────┘
 ```
 
 - **Main thread**: ratatui event loop, input handling, UI rendering (~60fps)
-- **Audio engine thread**: symphonia decoding → volume → ring buffer, sends position/level events via crossbeam channels
-- **cpal callback**: reads from lock-free ring buffer (real-time safe)
+- **Audio engine thread**: Symphonia decoding → ReplayGain → EQ → ring buffer, sends position/level/spectrum events via crossbeam
+- **cpal callback**: reads from lock-free ring buffer (real-time safe), volume ramp, spectrum tap
 
 ## Roadmap
 
-### Phase 3 — Search, Settings, Album Art *(in progress)*
-- Search tab — filter-as-you-type across artist/album/title
-- Settings tab — live config editing, persist to TOML
-- Album art — Kitty graphics protocol (kitty, Rio), ASCII art fallback (alacritty, etc.)
-- Shuffle & repeat modes (sequential, shuffle, repeat-one, repeat-all)
-- Theming (TOML-based, bundled Catppuccin/Gruvbox)
-- Terminal capability detection at startup
-
-### Phase 4 — Pomodoro Timer
-- Pomodoro mode that controls play/pause automatically
-- Work session plays your music, break swaps to a clock tick-tock track
-- UI transforms during breaks: analog clock, hourglass/sand timer, or digital countdown
-- Red indicator when break time is up
-- Configurable work/break durations
-
-### Phase 5 — Podcasts & RSS
-- Subscribe to RSS/Atom feeds for podcasts and newscasts
-- Download or stream episodes directly
-- Podcast-specific UI (show notes, episode list, playback speed)
-- Configurable feed list in settings
-
-### Phase 6 — AI Music Generation
-- AI tab — generate lofi/ambient music on the fly
-- Natural language control ("make it more mellow", "jazz it up", "something vigorous")
-- Built-in synth engine + Ollama for local inference
-- Cloud BYOK (bring your own API key) for hosted models
-- Mood-aware: "doing a 10 minute workout, give me something vigorous"
-
-### Future
-- Spectrum visualizer with Blackman-Harris FFT
-- 10-band graphic equalizer
-- EBU R128 loudness normalization
-- Gapless playback with crossfade
-- Audio device selection and hot-switching
-- MPRIS2 media controls
-- Chroma-like audio-reactive visual effects
-- SQLite library index with FTS5 search
+See [ROADMAP.md](ROADMAP.md) for where we're headed.
 
 ## Credits
 
@@ -103,4 +73,4 @@ Inspired by [kew](https://github.com/ravachol/kew) by ravachol. Spelman is a gro
 
 ## License
 
-MIT
+GPL-3.0

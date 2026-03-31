@@ -218,8 +218,19 @@ fn scan_waveform(path: &Path, cancel: &AtomicBool) -> Option<Vec<f32>> {
 
         let spec = *decoded.spec();
         let num_frames = decoded.frames();
+        if num_frames == 0 || spec.channels.count() == 0 {
+            packets_decoded += 1;
+            continue;
+        }
         let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
-        sample_buf.copy_interleaved_ref(decoded);
+        // Symphonia can panic on malformed packets; skip them gracefully.
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sample_buf.copy_interleaved_ref(decoded);
+        }));
+        if ok.is_err() {
+            packets_decoded += 1;
+            continue;
+        }
 
         for &s in sample_buf.samples() {
             let abs = s.abs();
