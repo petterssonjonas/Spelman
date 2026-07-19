@@ -11,6 +11,9 @@ TEMP.md
 .gitnexus/
 .claude/
 .kilocode/
+.omo/
+.opencode/
+Spelman_Project_Vault/
 
 # Binary symlink
 spelman
