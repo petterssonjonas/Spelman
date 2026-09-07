@@ -10,7 +10,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 use ratatui::Terminal;
 
 use crate::config::settings::{BindableAction, CustomEqPreset, Settings, key_to_string};
@@ -861,24 +861,8 @@ impl App {
                 // Search popup (~80% height, ~70% width, centered).
                 if self.search_visible {
                     let popup = centered_popup(area, 70, 80);
-                    // Clear the popup area.
                     let buf = frame.buffer_mut();
-                    for y in popup.y..popup.y + popup.height {
-                        for x in popup.x..popup.x + popup.width {
-                            if let Some(cell) = buf.cell_mut((x, y)) {
-                                cell.reset();
-                            }
-                        }
-                    }
-                    // Draw border.
-                    render_popup_border(buf, popup, "Search", accent);
-                    // Inner area (inside border).
-                    let inner = Rect {
-                        x: popup.x + 1,
-                        y: popup.y + 1,
-                        width: popup.width.saturating_sub(2),
-                        height: popup.height.saturating_sub(2),
-                    };
+                    let inner = render_popup_border(buf, popup, "Search", accent);
                     SearchTab { state: &self.search_state, library: &self.library_state.library }.render(inner, buf);
                 }
 
@@ -886,20 +870,7 @@ impl App {
                 if self.pomodoro_visible {
                     let popup = centered_square_popup(area);
                     let buf = frame.buffer_mut();
-                    for y in popup.y..popup.y + popup.height {
-                        for x in popup.x..popup.x + popup.width {
-                            if let Some(cell) = buf.cell_mut((x, y)) {
-                                cell.reset();
-                            }
-                        }
-                    }
-                    render_popup_border(buf, popup, "Pomodoro", Color::Green);
-                    let inner = Rect {
-                        x: popup.x + 1,
-                        y: popup.y + 1,
-                        width: popup.width.saturating_sub(2),
-                        height: popup.height.saturating_sub(2),
-                    };
+                    let inner = render_popup_border(buf, popup, "Pomodoro", Color::Green);
                     PomodoroTab { timer: &self.pomodoro }.render(inner, buf);
                 }
 
@@ -907,20 +878,7 @@ impl App {
                 if self.keybindings_visible {
                     let popup = centered_popup(area, 60, 80);
                     let buf = frame.buffer_mut();
-                    for y in popup.y..popup.y + popup.height {
-                        for x in popup.x..popup.x + popup.width {
-                            if let Some(cell) = buf.cell_mut((x, y)) {
-                                cell.reset();
-                            }
-                        }
-                    }
-                    render_popup_border(buf, popup, "Keybindings", accent);
-                    let inner = Rect {
-                        x: popup.x + 1,
-                        y: popup.y + 1,
-                        width: popup.width.saturating_sub(2),
-                        height: popup.height.saturating_sub(2),
-                    };
+                    let inner = render_popup_border(buf, popup, "Keybindings", accent);
                     render_keybindings_popup(buf, inner, &self.settings, accent, text_color);
                 }
 
@@ -928,20 +886,7 @@ impl App {
                 if self.playlist_picker_visible {
                     let popup = centered_popup(area, 50, 60);
                     let buf = frame.buffer_mut();
-                    for y in popup.y..popup.y + popup.height {
-                        for x in popup.x..popup.x + popup.width {
-                            if let Some(cell) = buf.cell_mut((x, y)) {
-                                cell.reset();
-                            }
-                        }
-                    }
-                    render_popup_border(buf, popup, "Add to Playlist", accent);
-                    let inner = Rect {
-                        x: popup.x + 1,
-                        y: popup.y + 1,
-                        width: popup.width.saturating_sub(2),
-                        height: popup.height.saturating_sub(2),
-                    };
+                    let inner = render_popup_border(buf, popup, "Add to Playlist", accent);
                     render_playlist_picker(
                         buf, inner,
                         &self.playlists_state.playlists,
@@ -955,20 +900,7 @@ impl App {
                 if self.recent_popup_visible {
                     let popup = centered_popup(area, 60, 70);
                     let buf = frame.buffer_mut();
-                    for y in popup.y..popup.y + popup.height {
-                        for x in popup.x..popup.x + popup.width {
-                            if let Some(cell) = buf.cell_mut((x, y)) {
-                                cell.reset();
-                            }
-                        }
-                    }
-                    render_popup_border(buf, popup, "Recently Played", accent);
-                    let inner = Rect {
-                        x: popup.x + 1,
-                        y: popup.y + 1,
-                        width: popup.width.saturating_sub(2),
-                        height: popup.height.saturating_sub(2),
-                    };
+                    let inner = render_popup_border(buf, popup, "Recently Played", accent);
                     render_recent_popup(
                         buf, inner,
                         &self.recent_tracks,
@@ -982,20 +914,7 @@ impl App {
                     if let Some(ref pl_name) = self.active_playlist {
                         let popup = centered_popup(area, 50, 60);
                         let buf = frame.buffer_mut();
-                        for y in popup.y..popup.y + popup.height {
-                            for x in popup.x..popup.x + popup.width {
-                                if let Some(cell) = buf.cell_mut((x, y)) {
-                                    cell.reset();
-                                }
-                            }
-                        }
-                        render_popup_border(buf, popup, pl_name, accent);
-                        let inner = Rect {
-                            x: popup.x + 1,
-                            y: popup.y + 1,
-                            width: popup.width.saturating_sub(2),
-                            height: popup.height.saturating_sub(2),
-                        };
+                        let inner = render_popup_border(buf, popup, pl_name, accent);
                         render_queue_popup(
                             buf, inner,
                             &self.player.queue,
@@ -1009,20 +928,7 @@ impl App {
                 if self.queue_popup_visible {
                     let popup = centered_popup(area, 50, 60);
                     let buf = frame.buffer_mut();
-                    for y in popup.y..popup.y + popup.height {
-                        for x in popup.x..popup.x + popup.width {
-                            if let Some(cell) = buf.cell_mut((x, y)) {
-                                cell.reset();
-                            }
-                        }
-                    }
-                    render_popup_border(buf, popup, "Queue", accent);
-                    let inner = Rect {
-                        x: popup.x + 1,
-                        y: popup.y + 1,
-                        width: popup.width.saturating_sub(2),
-                        height: popup.height.saturating_sub(2),
-                    };
+                    let inner = render_popup_border(buf, popup, "Queue", accent);
                     render_queue_popup(
                         buf, inner,
                         &self.player.queue,
@@ -2683,35 +2589,19 @@ fn centered_square_popup(area: Rect) -> Rect {
     }
 }
 
-/// Draw a simple border around a popup area.
-fn render_popup_border(buf: &mut ratatui::buffer::Buffer, area: Rect, title: &str, color: Color) {
-    let style = Style::default().fg(color);
+/// Clear a popup, draw its frame, and return the content area.
+fn render_popup_border(buf: &mut ratatui::buffer::Buffer, area: Rect, title: &str, color: Color) -> Rect {
     let dim = Style::default().fg(Color::DarkGray);
-
-    // Top border.
-    let top: String = format!("\u{250c}{}\u{2510}", "\u{2500}".repeat((area.width as usize).saturating_sub(2)));
-    buf.set_string(area.x, area.y, &top, dim);
-    // Title overlay.
-    let title_str = format!(" {title} ");
-    buf.set_string(area.x + 2, area.y, &title_str, style);
-    // Close button [x] at top-right.
-    let close_str = "[x]";
-    let close_x = area.x + area.width.saturating_sub(close_str.len() as u16 + 1);
-    buf.set_string(close_x, area.y, close_str, Style::default().fg(Color::DarkGray));
-
-    // Bottom border.
-    let bottom: String = format!("\u{2514}{}\u{2518}", "\u{2500}".repeat((area.width as usize).saturating_sub(2)));
-    if area.y + area.height > 0 {
-        buf.set_string(area.x, area.y + area.height - 1, &bottom, dim);
+    let block = Block::bordered().border_style(dim);
+    let inner = block.inner(area);
+    Clear.render(area, buf);
+    block.render(area, buf);
+    if area.width >= 4 && area.height >= 2 {
+        buf.set_string(area.x + 2, area.y, format!(" {title} "), Style::default().fg(color));
+        // Keep the close button aligned with the existing mouse hit target.
+        buf.set_string(area.right() - 4, area.y, "[x]", dim);
     }
-
-    // Side borders.
-    for y in (area.y + 1)..(area.y + area.height.saturating_sub(1)) {
-        buf.set_string(area.x, y, "\u{2502}", dim);
-        if area.width > 1 {
-            buf.set_string(area.x + area.width - 1, y, "\u{2502}", dim);
-        }
-    }
+    inner
 }
 
 /// Render the keybindings reference table inside a popup.
@@ -2995,4 +2885,73 @@ fn render_queue_popup(
         Style::default().fg(Color::DarkGray),
     );
 }
+#[cfg(test)]
+mod popup_tests {
+    use super::*;
+    use ratatui::buffer::{Buffer, Cell};
 
+    #[test]
+    fn popup_preserves_geometry_styles_and_close_position() {
+        // Given a popup over styled content, for each popup title and accent.
+        let area = Rect::new(2, 1, 40, 5);
+        let seed = Cell::default()
+            .set_symbol("X")
+            .set_style(Style::default().fg(Color::Red).bg(Color::Blue).add_modifier(Modifier::BOLD))
+            .clone();
+        for (title, color) in [
+            ("Search", Color::Cyan), ("Pomodoro", Color::Green),
+            ("Keybindings", Color::Cyan), ("Add to Playlist", Color::Cyan),
+            ("Recently Played", Color::Cyan), ("My playlist", Color::Cyan),
+            ("Queue", Color::Cyan),
+        ] {
+            let mut buf = Buffer::filled(Rect::new(0, 0, 44, 7), seed.clone());
+            // When the popup frame is rendered.
+            let inner = render_popup_border(&mut buf, area, title, color);
+            // Then its dimensions, title offset, frame and close hit target stay stable.
+            assert_eq!(inner, Rect::new(3, 2, 38, 3));
+            let title_text = format!(" {title} ");
+            let top = format!("┌─{title_text}{}[x]┐", "─".repeat(34 - title_text.len()));
+            let bottom = format!("└{}┘", "─".repeat(38));
+            for (row, expected) in [(area.y, top), (area.bottom() - 1, bottom)] {
+                for (offset, symbol) in expected.chars().enumerate() {
+                    let x = area.x + u16::try_from(offset).unwrap();
+                    assert_eq!(buf[(x, row)].symbol(), symbol.to_string());
+                    let fg = if row == area.y && offset >= 2 && offset < 2 + title_text.len() {
+                        color
+                    } else {
+                        Color::DarkGray
+                    };
+                    assert_eq!(buf[(x, row)].style(), Cell::default().set_fg(fg).style());
+                }
+            }
+            for y in inner.y..inner.bottom() {
+                for x in inner.x..inner.right() {
+                    assert_eq!(buf[(x, y)], Cell::default());
+                }
+                for x in [area.x, area.right() - 1] {
+                    assert_eq!(buf[(x, y)], *Cell::default().set_symbol("│").set_fg(Color::DarkGray));
+                }
+            }
+            assert_eq!(buf[(area.x - 1, area.y)], seed);
+            assert_eq!(buf[(area.right(), area.y)], seed);
+        }
+    }
+
+    #[test]
+    fn popup_handles_tiny_dimensions() {
+        // Given even empty or narrower-than-border terminal areas.
+        for width in 0..=4 {
+            for height in 0..=2 {
+                let area = Rect::new(0, 0, width, height);
+                let mut buf = Buffer::empty(area);
+                // When rendering the same popup frame.
+                let inner = render_popup_border(&mut buf, area, "Search", Color::Cyan);
+                // Then the inner area is bounded and empty, without panicking.
+                assert_eq!(inner.width, width.saturating_sub(2));
+                assert_eq!(inner.height, height.saturating_sub(2));
+                assert!(inner.x <= area.right());
+                assert!(inner.y <= area.bottom());
+            }
+        }
+    }
+}
