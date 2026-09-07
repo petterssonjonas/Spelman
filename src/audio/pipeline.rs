@@ -4,7 +4,6 @@ use crossbeam_channel::Sender;
 use rustfft::num_complex::Complex;
 
 use crate::audio::eq::Equalizer;
-use crate::audio::volume::VolumeControl;
 use crate::util::channels::AudioEvent;
 
 const FFT_SIZE: usize = 2048;
@@ -148,12 +147,11 @@ impl SpectrumAnalyser {
 
 // ── DspChain ─────────────────────────────────────────────────────────────────
 
-/// Bundles all per-sample processing: volume ramping, EQ, and RMS metering.
+/// Bundles ReplayGain, EQ, and RMS metering before output volume is applied.
 /// Spectrum analysis is handled separately on the output side for accurate
 /// synchronisation with what the listener actually hears.
 pub struct DspChain {
-    pub volume: VolumeControl,
-    /// 10-band graphic equalizer — sits between volume and metering so the
+    /// 10-band graphic equalizer — sits between ReplayGain and metering so the
     /// level reflects the post-EQ signal.
     pub eq: Equalizer,
     /// ReplayGain linear multiplier (1.0 = no change).
@@ -162,9 +160,8 @@ pub struct DspChain {
 
 impl DspChain {
     /// Create a new DSP chain for the given stream parameters.
-    pub fn new(sample_rate: u32, channels: u16, initial_volume: f32) -> Self {
+    pub fn new(sample_rate: u32, channels: u16) -> Self {
         Self {
-            volume: VolumeControl::new(initial_volume, sample_rate),
             eq: Equalizer::new(sample_rate, channels),
             replay_gain: 1.0,
         }

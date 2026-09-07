@@ -58,18 +58,6 @@ impl AudioEngine {
     }
 }
 
-impl Drop for AudioEngine {
-    fn drop(&mut self) {
-        // If shutdown() wasn't called explicitly, join here.
-        if let Some(handle) = self.handle.take() {
-            // The cmd_tx is about to be dropped, which will unblock the engine thread.
-            // We can't join here because cmd_tx hasn't been dropped yet — the thread
-            // might be blocked on recv. Just let the thread detach naturally.
-            drop(handle);
-        }
-    }
-}
-
 // ── engine_thread ─────────────────────────────────────────────────────────────
 
 fn engine_thread(cmd_rx: Receiver<AudioCommand>, event_tx: Sender<AudioEvent>) {
