@@ -276,43 +276,11 @@ pub struct KeyBindings {
 
 impl Default for KeyBindings {
     fn default() -> Self {
-        use BindableAction::*;
-        let mut b = BTreeMap::new();
-
-        b.insert(Quit, vec!["q".into(), "Q".into()]);
-        b.insert(TogglePlayPause, vec!["space".into()]);
-        b.insert(VolumeUp, vec!["+".into(), "=".into()]);
-        b.insert(VolumeDown, vec!["-".into(), "_".into()]);
-        b.insert(SeekForward, vec!["l".into()]);
-        b.insert(SeekBackward, vec!["h".into()]);
-        b.insert(ScrollDown, vec!["j".into(), "down".into()]);
-        b.insert(ScrollUp, vec!["k".into(), "up".into()]);
-        b.insert(Enter, vec!["enter".into()]);
-        b.insert(Back, vec!["esc".into()]);
-        b.insert(Backspace, vec!["backspace".into()]);
-        b.insert(NextTrack, vec!["n".into()]);
-        b.insert(PrevTrack, vec!["p".into()]);
-        b.insert(TabNext, vec!["right".into()]);
-        b.insert(TabPrev, vec!["left".into()]);
-        b.insert(SwitchPane, vec!["tab".into(), "backtab".into()]);
-        b.insert(ToggleSearch, vec!["s".into(), "S".into()]);
-        b.insert(TogglePomodoro, vec!["P".into()]);
-        b.insert(ToggleKeybindings, vec!["K".into()]);
-        b.insert(ToggleEq, vec!["e".into()]);
-        b.insert(ToggleEqEnabled, vec!["t".into()]);
-        b.insert(EnqueueTrack, vec!["E".into()]);
-        b.insert(AddToPlaylist, vec!["A".into()]);
-        b.insert(ShowRecentlyPlayed, vec!["R".into()]);
-        b.insert(SavePlaylist, vec!["a".into()]);
-        b.insert(ToggleCheckbox, vec!["x".into()]);
-        b.insert(ViewTracks, vec!["v".into()]);
-        b.insert(DeletePlaylist, vec!["d".into()]);
-        b.insert(SkipPomodoro, vec!["f".into()]);
-        b.insert(CyclePomodoroStyle, vec!["v".into()]);
-        b.insert(ToggleLyrics, vec!["L".into()]);
-        b.insert(ToggleChroma, vec!["6".into()]);
-
-        Self { bindings: b }
+        let bindings = BindableAction::ALL.iter().map(|&action| {
+            let keys = Self::default_keys_for(action).iter().map(|&key| key.into()).collect();
+            (action, keys)
+        }).collect();
+        Self { bindings }
     }
 }
 
