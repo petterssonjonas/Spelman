@@ -17,14 +17,6 @@ pub fn fetch_from_lrclib(
         return None;
     }
 
-    let url = format!(
-        "https://lrclib.net/api/get?track_name={}&artist_name={}&album_name={}&duration={}",
-        urlenc(title),
-        urlenc(artist),
-        urlenc(album),
-        duration_secs,
-    );
-
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(5)))
         .user_agent(concat!("Spelman/", env!("CARGO_PKG_VERSION")))
@@ -32,7 +24,11 @@ pub fn fetch_from_lrclib(
         .new_agent();
 
     let resp = agent
-        .get(&url)
+        .get("https://lrclib.net/api/get")
+        .query("track_name", title)
+        .query("artist_name", artist)
+        .query("album_name", album)
+        .query("duration", duration_secs.to_string())
         .call()
         .ok()?;
 
@@ -60,24 +56,4 @@ pub fn fetch_from_lrclib(
     }
 
     Some((synced, plain))
-}
-
-/// Minimal percent-encoding for URL query parameters.
-fn urlenc(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for ch in s.chars() {
-        match ch {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(ch),
-            ' ' => out.push_str("%20"),
-            _ => {
-                let mut buf = [0u8; 4];
-                let encoded = ch.encode_utf8(&mut buf);
-                for &b in encoded.as_bytes() {
-                    out.push('%');
-                    out.push_str(&format!("{:02X}", b));
-                }
-            }
-        }
-    }
-    out
 }
