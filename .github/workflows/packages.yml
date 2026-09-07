@@ -116,34 +116,14 @@ jobs:
           files: spelman.flatpak
 
   homebrew:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag }}
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build release binary (arm64)
-        run: cargo build --release
-
-      - name: Strip binary
-        run: strip target/release/spelman
-
-      - name: Package macOS binary
-        run: |
-          VERSION=${{ inputs.tag }}
-          VERSION=${VERSION#v}
-          tar czf spelman-macos-arm64-${VERSION}.tar.gz \
-            -C target/release spelman \
-            -C "$GITHUB_WORKSPACE" README.md LICENSE
-
       - name: Generate Homebrew formula
         run: |
-          VERSION=${{ inputs.tag }}
-          VERSION=${VERSION#v}
-          SHA=$(shasum -a 256 spelman-macos-arm64-${VERSION}.tar.gz | awk '{print $1}')
           cat > spelman.rb <<FORMULA
           class Spelman < Formula
             desc "Terminal music player with spectrum visualizer and pomodoro timer"
@@ -163,10 +143,8 @@ jobs:
           end
           FORMULA
 
-      - name: Upload binary to release
+      - name: Upload Homebrew formula to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
-          files: |
-            spelman-macos-arm64-*.tar.gz
-            spelman.rb
+          files: spelman.rb
