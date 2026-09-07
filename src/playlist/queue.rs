@@ -138,17 +138,6 @@ impl Queue {
         }
     }
 
-    /// Advance to the next track (simple, no mode awareness — for backwards compat).
-    pub fn next(&mut self) -> Option<&PathBuf> {
-        if let Some(idx) = self.current {
-            if idx + 1 < self.tracks.len() {
-                self.current = Some(idx + 1);
-                return self.tracks.get(idx + 1);
-            }
-        }
-        None
-    }
-
     /// Go back to the previous track (uses history stack in shuffle mode).
     pub fn prev(&mut self) -> Option<&PathBuf> {
         // Pop from history if available — works for both shuffle and sequential.
@@ -176,25 +165,6 @@ impl Queue {
         }
     }
 
-    /// Remove a track at the given index.
-    pub fn remove(&mut self, index: usize) {
-        if index >= self.tracks.len() {
-            return;
-        }
-        self.tracks.remove(index);
-        if self.tracks.is_empty() {
-            self.current = None;
-        } else if let Some(cur) = self.current {
-            if index < cur {
-                self.current = Some(cur - 1);
-            } else if index == cur && cur >= self.tracks.len() {
-                self.current = Some(self.tracks.len() - 1);
-            }
-        }
-        // Invalidate shuffle order.
-        self.shuffle_order.clear();
-    }
-
     /// Get all tracks in the queue.
     pub fn tracks(&self) -> &[PathBuf] {
         &self.tracks
@@ -210,4 +180,3 @@ impl Queue {
         self.tracks.is_empty()
     }
 }
-

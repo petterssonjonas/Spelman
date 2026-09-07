@@ -30,21 +30,9 @@ impl Lyrics {
     pub fn current_line_index(&self, elapsed: Duration) -> Option<usize> {
         match self {
             Lyrics::Synced(lines) => {
-                if lines.is_empty() {
-                    return None;
-                }
-                // Binary search for the last line with timestamp ≤ elapsed.
-                let mut lo = 0usize;
-                let mut hi = lines.len();
-                while lo < hi {
-                    let mid = lo + (hi - lo) / 2;
-                    if lines[mid].timestamp.unwrap_or(Duration::ZERO) <= elapsed {
-                        lo = mid + 1;
-                    } else {
-                        hi = mid;
-                    }
-                }
-                if lo == 0 { None } else { Some(lo - 1) }
+                lines.partition_point(|line| {
+                    line.timestamp.unwrap_or(Duration::ZERO) <= elapsed
+                }).checked_sub(1)
             }
             Lyrics::Unsynced(_) => None,
         }
@@ -211,4 +199,25 @@ fn simple_hash(s: &str) -> u64 {
         h = h.wrapping_mul(0x100000001b3); // FNV-1a prime
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_line_tracks_timestamp_boundaries() {
+        let lyrics = Lyrics::Synced(vec![
+            LyricLine { timestamp: Some(Duration::from_secs(2)), text: "first".into() },
+            LyricLine { timestamp: Some(Duration::from_secs(4)), text: "second".into() },
+            LyricLine { timestamp: Some(Duration::from_secs(4)), text: "duplicate".into() },
+        ]);
+        for (seconds, expected) in [(0, None), (2, Some(0)), (3, Some(0)), (4, Some(2)), (9, Some(2))] {
+            assert_eq!(lyrics.current_line_index(Duration::from_secs(seconds)), expected);
+        }
+        assert_eq!(Lyrics::Synced(Vec::new()).current_line_index(Duration::ZERO), None);
+        assert_eq!(Lyrics::Unsynced(vec!["plain".into()]).current_line_index(Duration::ZERO), None);
+        let untimed = Lyrics::Synced(vec![LyricLine { timestamp: None, text: "untimed".into() }]);
+        assert_eq!(untimed.current_line_index(Duration::ZERO), Some(0));
+    }
 }

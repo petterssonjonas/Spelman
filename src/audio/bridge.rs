@@ -73,7 +73,7 @@ pub fn start_playback(
     let seek_pending = Arc::new(AtomicBool::new(false));
     let samples_played = Arc::new(AtomicU64::new(0));
 
-    let dsp = DspChain::new(info.sample_rate, info.channels, current_volume);
+    let dsp = DspChain::new(info.sample_rate, info.channels);
 
     let config = StreamConfig {
         channels: info.channels,

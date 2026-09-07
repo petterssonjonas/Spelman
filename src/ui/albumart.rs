@@ -1,30 +1,6 @@
 use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView};
-use lofty::file::TaggedFileExt;
-use lofty::picture::PictureType;
 use ratatui::style::Color;
-use std::path::Path;
-
-/// Extract cover art from an audio file.
-pub fn extract_cover(path: &Path) -> Option<Vec<u8>> {
-    let tagged = lofty::probe::Probe::open(path)
-        .ok()?
-        .guess_file_type()
-        .ok()?
-        .read()
-        .ok()?;
-
-    let tag = tagged.primary_tag().or(tagged.first_tag())?;
-
-    // Try front cover first, then any picture.
-    let picture = tag
-        .pictures()
-        .iter()
-        .find(|p| p.pic_type() == PictureType::CoverFront)
-        .or_else(|| tag.pictures().first())?;
-
-    Some(picture.data().to_vec())
-}
 
 /// Load image data into a DynamicImage.
 pub fn load_image(data: &[u8]) -> Option<DynamicImage> {
